@@ -70,7 +70,7 @@ async fn main() {
     let deposit_contract =
         std::env::var("DEPOSIT_CONTRACT").unwrap_or_else(|_| "deposit.tipbot.near".into());
     let fund_base_url = std::env::var("FUND_BASE_URL")
-        .unwrap_or_else(|_| "https://app.outlayer.ai/wallet/fund".into());
+        .unwrap_or_else(|_| "https://outlayer.fastnear.com/wallet/fund".into());
 
     let wnear_contract = std::env::var("WNEAR_TOKEN")
         .unwrap_or_else(|_| "wrap.near".into());
@@ -182,8 +182,7 @@ async fn handle_command(
             if !ensure_private(&bot, &msg, &state).await? {
                 return Ok(());
             }
-            let user_id = msg.from.as_ref().unwrap().id.0;
-            let (text, kb) = handlers::deposit_view(&state, user_id).await;
+            let (text, kb) = handlers::deposit_choose_token();
             bot.send_message(msg.chat.id, text)
                 .parse_mode(HTML)
                 .reply_markup(kb)

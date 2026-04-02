@@ -33,6 +33,9 @@ pub async fn handle_text(bot: Bot, msg: Message, state: Arc<AppState>) -> Respon
         ConvoState::SwapAmount { .. } => {
             super::swap::handle_text(&bot, &msg, &state, user_id).await
         }
+        ConvoState::DepositAmount { token_key } => {
+            handle_deposit_amount(&bot, &msg, &state, user_id, &token_key).await
+        }
     }
 }
 
@@ -237,6 +240,80 @@ pub async fn handle_max_callback(
              Network: {chain}\n\
              Amount: <b>{pfx}{display}</b> {sym} (all)",
             pfx = token.prefix,
+            sym = token.symbol,
+        ),
+    )
+    .parse_mode(HTML)
+    .reply_markup(kb)
+    .await?;
+
+    Ok(())
+}
+
+async fn handle_deposit_amount(
+    bot: &Bot,
+    msg: &Message,
+    state: &AppState,
+    user_id: u64,
+    token_key: &str,
+) -> ResponseResult<()> {
+    let text = match msg.text() {
+        Some(t) => t.trim(),
+        None => {
+            bot.send_message(msg.chat.id, "Please send the amount as a number.")
+                .await?;
+            return Ok(());
+        }
+    };
+
+    if text.starts_with('/') {
+        return Ok(());
+    }
+
+    let token = state.token_by_key(token_key);
+
+    // Validate it's a positive number
+    let amount: f64 = match text.parse() {
+        Ok(a) if a > 0.0 => a,
+        _ => {
+            bot.send_message(msg.chat.id, "Invalid amount. Enter a positive number.")
+                .reply_parameters(ReplyParameters::new(msg.id))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    state.conversations.remove(&user_id);
+
+    let _ = state.outlayer.register_wallet(user_id).await;
+    let addr = state
+        .outlayer
+        .get_address(user_id, "near")
+        .await
+        .unwrap_or_else(|_| "error".into());
+
+    // Format amount nicely (strip trailing zeros)
+    let amount_str = if amount.fract() == 0.0 {
+        format!("{}", amount as u64)
+    } else {
+        format!("{amount}")
+    };
+
+    let url = super::fund_url(state, &addr, token_key, &amount_str);
+
+    let kb = InlineKeyboardMarkup::new(vec![
+        vec![InlineKeyboardButton::url(
+            format!("Open wallet — {amount_str} {}", token.symbol),
+            url.parse().unwrap(),
+        )],
+        vec![super::back_button()],
+    ]);
+
+    bot.send_message(
+        msg.chat.id,
+        format!(
+            "<b>📥 Deposit {amount_str} {sym}</b>\n\n\
+             Tap the button below to open your wallet and send {amount_str} {sym}.",
             sym = token.symbol,
         ),
     )

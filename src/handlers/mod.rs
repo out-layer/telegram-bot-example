@@ -27,6 +27,7 @@ pub enum ConvoState {
     WithdrawAddress { token_key: String },
     WithdrawAmount { token_key: String, address: String, chain: String },
     SwapAmount { from_key: String, to_key: String },
+    DepositAmount { token_key: String },
 }
 
 #[derive(Clone, Debug)]
@@ -109,47 +110,53 @@ pub async fn balance_view(
     (text, kb)
 }
 
-pub async fn deposit_view(
-    state: &crate::AppState,
-    user_id: u64,
-) -> (String, InlineKeyboardMarkup) {
-    let _ = state.outlayer.register_wallet(user_id).await;
-
-    let addr = state
-        .outlayer
-        .get_address(user_id, "near")
-        .await
-        .unwrap_or_else(|_| "error".into());
-
-    let text = format!(
-        "<b>📥 Deposit</b>\n\n\
-         Your intents address:\n\
-         <code>{addr}</code>\n\n\
-         Tap a button below to deposit via web wallet."
-    );
-
-    // Build fund links
-    let base = &state.fund_base_url;
-    let args_json = format!(r#"{{"msg":"{addr}"}}"#);
-    let args = urlencoding::encode(&args_json);
-    let near_url = format!(
-        "{base}?to={addr}&amount=1&token=near&via={}&method=deposit&args={args}&gas=100",
-        state.deposit_contract
-    );
-    let usdc_url = format!(
-        "{base}?to={addr}&amount=10&token={}&dest=intents",
-        state.usdc_token.contract
-    );
-
+/// Deposit: choose token
+pub fn deposit_choose_token() -> (String, InlineKeyboardMarkup) {
+    let text = "<b>📥 Deposit</b>\n\nChoose token:".to_string();
     let kb = InlineKeyboardMarkup::new(vec![
         vec![
-            InlineKeyboardButton::url("Deposit NEAR", near_url.parse().unwrap()),
-            InlineKeyboardButton::url("Deposit USDC", usdc_url.parse().unwrap()),
+            InlineKeyboardButton::callback("NEAR", "dep:near"),
+            InlineKeyboardButton::callback("USDC", "dep:usdc"),
         ],
         vec![back_button()],
     ]);
-
     (text, kb)
+}
+
+/// Deposit: choose amount (preset buttons + custom)
+pub fn deposit_choose_amount(token_key: &str) -> (String, InlineKeyboardMarkup) {
+    let symbol = if token_key == "near" { "NEAR" } else { "USDC" };
+    let text = format!(
+        "<b>📥 Deposit {symbol}</b>\n\nChoose amount or enter a custom one:"
+    );
+    let presets = ["0.5", "1", "5", "10"];
+    let kb = InlineKeyboardMarkup::new(vec![
+        presets
+            .iter()
+            .map(|a| InlineKeyboardButton::callback(*a, format!("dep:amt:{token_key}:{a}")))
+            .collect(),
+        vec![InlineKeyboardButton::callback("Custom amount", format!("dep:custom:{token_key}"))],
+        vec![InlineKeyboardButton::callback("← Back", "cb:deposit")],
+    ]);
+    (text, kb)
+}
+
+/// Build a fund URL for a given token and amount.
+pub fn fund_url(state: &crate::AppState, addr: &str, token_key: &str, amount: &str) -> String {
+    let base = &state.fund_base_url;
+    if token_key == "near" {
+        let args_json = format!(r#"{{"msg":"{addr}"}}"#);
+        let args = urlencoding::encode(&args_json);
+        format!(
+            "{base}?to={addr}&amount={amount}&token=near&via={}&method=deposit&args={args}&gas=100",
+            state.deposit_contract
+        )
+    } else {
+        format!(
+            "{base}?to={addr}&amount={amount}&token={}&dest=intents",
+            state.usdc_token.contract
+        )
+    }
 }
 
 // ── Keyboards ──────────────────────────────────────────────────────

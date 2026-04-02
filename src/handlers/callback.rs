@@ -4,7 +4,7 @@ use teloxide::types::{
     CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MaybeInaccessibleMessage,
 };
 
-use super::{balance_view, cancel_keyboard, deposit_view, menu_view, ConvoState, HTML};
+use super::{balance_view, cancel_keyboard, deposit_choose_amount, deposit_choose_token, fund_url, menu_view, ConvoState, HTML};
 use crate::outlayer::{adjust_for_dust, format_amount};
 use crate::AppState;
 
@@ -36,8 +36,53 @@ pub async fn handle(bot: Bot, q: CallbackQuery, state: Arc<AppState>) -> Respons
         }
 
         "cb:deposit" => {
-            let (text, kb) = deposit_view(&state, user_id).await;
+            let (text, kb) = deposit_choose_token();
             edit(&bot, chat_id, message_id, &text, kb).await;
+        }
+
+        "dep:near" | "dep:usdc" => {
+            let token_key = if data == "dep:near" { "near" } else { "usdc" };
+            let (text, kb) = deposit_choose_amount(token_key);
+            edit(&bot, chat_id, message_id, &text, kb).await;
+        }
+
+        _ if data.starts_with("dep:amt:") => {
+            // dep:amt:{token_key}:{amount}
+            let parts: Vec<&str> = data.splitn(4, ':').collect();
+            if parts.len() == 4 {
+                let token_key = parts[2];
+                let amount = parts[3];
+                let _ = state.outlayer.register_wallet(user_id).await;
+                let addr = state.outlayer.get_address(user_id, "near").await.unwrap_or_else(|_| "error".into());
+                let url = fund_url(&state, &addr, token_key, amount);
+                let symbol = state.token_by_key(token_key).symbol.clone();
+                let kb = InlineKeyboardMarkup::new(vec![
+                    vec![InlineKeyboardButton::url(
+                        format!("Open wallet — {amount} {symbol}"),
+                        url.parse().unwrap(),
+                    )],
+                    vec![InlineKeyboardButton::callback("← Back", if token_key == "near" { "dep:near" } else { "dep:usdc" })],
+                ]);
+                edit(
+                    &bot, chat_id, message_id,
+                    &format!(
+                        "<b>📥 Deposit {amount} {symbol}</b>\n\n\
+                         Tap the button below to open your wallet and send {amount} {symbol}."
+                    ),
+                    kb,
+                ).await;
+            }
+        }
+
+        _ if data.starts_with("dep:custom:") => {
+            let token_key = data.strip_prefix("dep:custom:").unwrap_or("near");
+            let symbol = state.token_by_key(token_key).symbol.clone();
+            state.conversations.insert(user_id, ConvoState::DepositAmount { token_key: token_key.to_string() });
+            edit(
+                &bot, chat_id, message_id,
+                &format!("<b>📥 Deposit {symbol}</b>\n\nEnter the amount:"),
+                cancel_keyboard(),
+            ).await;
         }
 
         // ── Swap ───────────────────────────────────────────────
