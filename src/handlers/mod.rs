@@ -121,24 +121,33 @@ pub async fn deposit_view(
         .await
         .unwrap_or_else(|_| "error".into());
 
-    let mut text = format!(
+    let text = format!(
         "<b>📥 Deposit</b>\n\n\
-         <b>USDC</b> — send directly to intents address:\n\
-         <code>{addr}</code>\n\
-         Network: NEAR (intents)\n"
+         Your intents address:\n\
+         <code>{addr}</code>\n\n\
+         Tap a button below to deposit via web wallet."
     );
 
-    if !state.deposit_contract.is_empty() {
-        text.push_str(&format!(
-            "\n<b>NEAR</b> — via deposit helper:\n\
-             <code>near call {contract} deposit '{{\"{msg_key}\":\"{addr}\"}}' \\\n  \
-             --accountId YOUR.near --deposit AMOUNT</code>",
-            contract = state.deposit_contract,
-            msg_key = "msg",
-        ));
-    }
+    // Build fund links
+    let base = &state.fund_base_url;
+    let args_json = format!(r#"{{"msg":"{addr}"}}"#);
+    let args = urlencoding::encode(&args_json);
+    let near_url = format!(
+        "{base}?to={addr}&amount=1&token=near&via={}&method=deposit&args={args}&gas=100",
+        state.deposit_contract
+    );
+    let usdc_url = format!(
+        "{base}?to={addr}&amount=10&token={}&dest=intents",
+        state.usdc_token.contract
+    );
 
-    let kb = InlineKeyboardMarkup::new(vec![vec![back_button()]]);
+    let kb = InlineKeyboardMarkup::new(vec![
+        vec![
+            InlineKeyboardButton::url("Deposit NEAR", near_url.parse().unwrap()),
+            InlineKeyboardButton::url("Deposit USDC", usdc_url.parse().unwrap()),
+        ],
+        vec![back_button()],
+    ]);
 
     (text, kb)
 }

@@ -16,6 +16,7 @@ pub struct AppState {
     pub outlayer: OutlayerClient,
     pub near_token: TokenConfig,
     pub usdc_token: TokenConfig,
+    pub fund_base_url: String,
     pub deposit_contract: String,
     pub bot_username: String,
     pub rate_limiter: DashMap<u64, Instant>,
@@ -68,6 +69,8 @@ async fn main() {
         .unwrap_or_else(|_| "https://api.outlayer.fastnear.com".into());
     let deposit_contract =
         std::env::var("DEPOSIT_CONTRACT").unwrap_or_else(|_| "deposit.tipbot.near".into());
+    let fund_base_url = std::env::var("FUND_BASE_URL")
+        .unwrap_or_else(|_| "https://app.outlayer.ai/wallet/fund".into());
 
     let wnear_contract = std::env::var("WNEAR_TOKEN")
         .unwrap_or_else(|_| "wrap.near".into());
@@ -122,6 +125,7 @@ async fn main() {
         outlayer: outlayer_client,
         near_token,
         usdc_token,
+        fund_base_url,
         deposit_contract,
         bot_username,
         rate_limiter: DashMap::new(),
