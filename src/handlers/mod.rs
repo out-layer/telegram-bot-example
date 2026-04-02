@@ -110,8 +110,13 @@ pub async fn balance_view(
          <code>{addr}</code>"
     );
 
+    let explorer_url = format!(
+        "https://publicintents.near.fastfs.io/publicintents.near/bd30a07fed2eb6c450c854fcd08af2422dfe80e0a119f6c4f4d2fa5fe2661efe.html?account={addr}"
+    );
+
     let kb = InlineKeyboardMarkup::new(vec![
         vec![InlineKeyboardButton::callback("🔄 Refresh", "cb:balance:refresh")],
+        vec![InlineKeyboardButton::url("📋 Transactions", explorer_url.parse().unwrap())],
         vec![back_button()],
     ]);
 

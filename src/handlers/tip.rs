@@ -116,6 +116,27 @@ pub async fn handle(
     }
     state.rate_limiter.insert(sender.id.0, now);
 
+    // Prevent concurrent tips from same sender (double-spend protection)
+    if state.tip_locks.contains_key(&sender.id.0) {
+        reply!(bot, msg, "Another tip is being processed. Please wait.");
+        return Ok(());
+    }
+    state.tip_locks.insert(sender.id.0, ());
+
+    let result = do_tip(&bot, &msg, &state, sender, receiver, amount_raw, token).await;
+    state.tip_locks.remove(&sender.id.0);
+    return result;
+}
+
+async fn do_tip(
+    bot: &Bot,
+    msg: &Message,
+    state: &crate::AppState,
+    sender: &teloxide::types::User,
+    receiver: &teloxide::types::User,
+    amount_raw: u128,
+    token: &TokenConfig,
+) -> ResponseResult<()> {
     // Register both wallets
     if let Err(e) = state.outlayer.register_wallet(sender.id.0).await {
         tracing::error!(sender = sender.id.0, "register sender: {e}");

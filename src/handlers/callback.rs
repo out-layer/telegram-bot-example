@@ -305,7 +305,9 @@ async fn execute_withdrawal(
                     "<b>✅ Withdrawal sent</b>\n\n\
                      Amount: <b>{pfx}{display}</b> {sym}\n\
                      To: <code>{addr}</code>\n\
-                     Network: {chain}",
+                     Network: {chain}\n\n\
+                     Withdrawals are processed via NEAR Intents.\n\
+                     Track at <a href=\"https://near-intents.org/account\">near-intents.org</a>",
                     pfx = token.prefix,
                     display = pending.amount_display,
                     sym = token.symbol,
