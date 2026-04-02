@@ -82,6 +82,12 @@ pub async fn balance_view(
     state: &crate::AppState,
     user_id: u64,
 ) -> (String, InlineKeyboardMarkup) {
+    let addr = state
+        .outlayer
+        .get_address(user_id, "near")
+        .await
+        .unwrap_or_else(|_| "—".into());
+
     let near_bal = state
         .outlayer
         .get_balance(user_id, &state.near_token.contract)
@@ -99,7 +105,9 @@ pub async fn balance_view(
     let text = format!(
         "<b>💰 Balance</b>\n\n\
          NEAR: <b>{near_fmt}</b>\n\
-         USDC: <b>${usdc_fmt}</b>"
+         USDC: <b>${usdc_fmt}</b>\n\n\
+         Outlayer wallet:\n\
+         <code>{addr}</code>"
     );
 
     let kb = InlineKeyboardMarkup::new(vec![

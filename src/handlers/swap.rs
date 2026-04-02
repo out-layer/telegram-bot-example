@@ -217,10 +217,16 @@ pub async fn execute(
         }
         Err(e) => {
             tracing::error!(user_id, "swap: {e}");
-            bot.edit_message_text(chat_id, message_id, "❌ Swap failed. Try again later.")
-                .reply_markup(InlineKeyboardMarkup::new(vec![vec![super::back_button()]]))
-                .await
-                .ok();
+            let short_err = if e.len() > 200 { &e[..200] } else { &e };
+            bot.edit_message_text(
+                chat_id,
+                message_id,
+                format!("❌ Swap failed:\n<code>{}</code>", teloxide::utils::html::escape(short_err)),
+            )
+            .parse_mode(HTML)
+            .reply_markup(InlineKeyboardMarkup::new(vec![vec![super::back_button()]]))
+            .await
+            .ok();
         }
     }
 }
