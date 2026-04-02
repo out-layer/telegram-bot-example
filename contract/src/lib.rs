@@ -1,46 +1,51 @@
+use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::json_types::U128;
-use near_sdk::{env, near, AccountId, Gas, NearToken, PanicOnDefault, Promise};
+use near_sdk::{env, near_bindgen, AccountId, Gas, NearToken, PanicOnDefault, Promise};
 
 const GAS_WRAP: Gas = Gas::from_tgas(15);
 const GAS_FT_TRANSFER: Gas = Gas::from_tgas(50);
 const GAS_CALLBACK: Gas = Gas::from_tgas(15);
 
-#[near(contract_state)]
-#[derive(PanicOnDefault)]
+#[near_bindgen]
+#[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct DepositHelper {
+    owner: AccountId,
     wrap_near: AccountId,
     intents: AccountId,
+    deposits_enabled: bool,
 }
 
-#[near]
+#[near_bindgen]
 impl DepositHelper {
     #[init]
     pub fn new(wrap_near: AccountId, intents: AccountId) -> Self {
-        Self { wrap_near, intents }
+        Self {
+            owner: env::predecessor_account_id(),
+            wrap_near,
+            intents,
+            deposits_enabled: true,
+        }
     }
 
-    /// One-time setup: register this contract with wrap.near for storage.
-    /// Attach >= 0.01 NEAR.
-    #[payable]
-    pub fn register_storage(&mut self) -> Promise {
-        let args = format!(
-            r#"{{"account_id":"{}"}}"#,
-            env::current_account_id()
+    pub fn set_deposits_enabled(&mut self, enabled: bool) {
+        assert_eq!(
+            env::predecessor_account_id(),
+            self.owner,
+            "Only owner"
         );
-        Promise::new(self.wrap_near.clone()).function_call(
-            "storage_deposit".to_string(),
-            args.into_bytes(),
-            env::attached_deposit(),
-            GAS_WRAP,
-        )
+        self.deposits_enabled = enabled;
+    }
+
+    pub fn get_deposits_enabled(&self) -> bool {
+        self.deposits_enabled
     }
 
     /// Wrap attached NEAR → wNEAR → deposit to intents.
-    ///
-    /// `msg` is forwarded to `ft_transfer_call` — the intents account to credit
-    /// (the user's Outlayer wallet NEAR implicit hex64 address).
+    /// `msg` = the intents account to credit (hex64 Outlayer wallet address).
     #[payable]
     pub fn deposit(&mut self, msg: String) -> Promise {
+        assert!(self.deposits_enabled, "Deposits are paused");
+
         let deposit = env::attached_deposit();
         assert!(
             deposit > NearToken::from_yoctonear(0),
@@ -62,23 +67,22 @@ impl DepositHelper {
 
     #[private]
     pub fn on_wrap(&mut self, amount: U128, msg: String, sender: AccountId) -> Promise {
-        match env::promise_result_checked(0, 0) {
-            Ok(_) => {
-                let args = format!(
-                    r#"{{"receiver_id":"{}","amount":"{}","msg":"{}"}}"#,
-                    self.intents, amount.0, msg
-                );
-                Promise::new(self.wrap_near.clone()).function_call(
-                    "ft_transfer_call".to_string(),
-                    args.into_bytes(),
-                    NearToken::from_yoctonear(1),
-                    GAS_FT_TRANSFER,
-                )
-            }
-            _ => {
-                env::log_str(&format!("wrap failed, refunding {} to {}", amount.0, sender));
-                Promise::new(sender).transfer(NearToken::from_yoctonear(amount.0))
-            }
+        if env::promise_results_count() == 1
+            && matches!(env::promise_result(0), near_sdk::PromiseResult::Successful(_))
+        {
+            let args = format!(
+                r#"{{"receiver_id":"{}","amount":"{}","msg":"{}"}}"#,
+                self.intents, amount.0, msg
+            );
+            Promise::new(self.wrap_near.clone()).function_call(
+                "ft_transfer_call".to_string(),
+                args.into_bytes(),
+                NearToken::from_yoctonear(1),
+                GAS_FT_TRANSFER,
+            )
+        } else {
+            env::log_str(&format!("wrap failed, refunding {} to {}", amount.0, sender));
+            Promise::new(sender).transfer(NearToken::from_yoctonear(amount.0))
         }
     }
 }

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use teloxide::prelude::*;
-use teloxide::types::{CallbackQuery, InlineKeyboardMarkup, MaybeInaccessibleMessage};
+use teloxide::types::{
+    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MaybeInaccessibleMessage,
+};
 
 use super::{balance_view, cancel_keyboard, deposit_view, menu_view, ConvoState, HTML};
 use crate::outlayer::{adjust_for_dust, format_amount};
@@ -19,9 +21,11 @@ pub async fn handle(bot: Bot, q: CallbackQuery, state: Arc<AppState>) -> Respons
     let user_id = q.from.id.0;
 
     match data {
+        // ── Menu ───────────────────────────────────────────────
         "cb:menu" => {
             state.conversations.remove(&user_id);
             state.pending_withdrawals.remove(&user_id);
+            state.pending_swaps.remove(&user_id);
             let (text, kb) = menu_view(&state, user_id).await;
             edit(&bot, chat_id, message_id, &text, kb).await;
         }
@@ -36,6 +40,95 @@ pub async fn handle(bot: Bot, q: CallbackQuery, state: Arc<AppState>) -> Respons
             edit(&bot, chat_id, message_id, &text, kb).await;
         }
 
+        // ── Swap ───────────────────────────────────────────────
+        "cb:swap" => {
+            let kb = InlineKeyboardMarkup::new(vec![
+                vec![
+                    InlineKeyboardButton::callback("NEAR → USDC", "cb:swap:near_usdc"),
+                    InlineKeyboardButton::callback("USDC → NEAR", "cb:swap:usdc_near"),
+                ],
+                vec![super::back_button()],
+            ]);
+            edit(
+                &bot,
+                chat_id,
+                message_id,
+                "<b>🔄 Swap</b>\n\nChoose direction:",
+                kb,
+            )
+            .await;
+        }
+
+        "cb:swap:near_usdc" | "cb:swap:usdc_near" => {
+            let (from_key, to_key) = if data == "cb:swap:near_usdc" {
+                ("near", "usdc")
+            } else {
+                ("usdc", "near")
+            };
+
+            let from_token = state.token_by_key(from_key);
+            let balance = state
+                .outlayer
+                .get_balance(user_id, &from_token.contract)
+                .await
+                .unwrap_or_else(|_| "0".into());
+            let bal_fmt =
+                format_amount(&balance, from_token.decimals, from_token.display_dp);
+
+            state.conversations.insert(
+                user_id,
+                ConvoState::SwapAmount {
+                    from_key: from_key.into(),
+                    to_key: to_key.into(),
+                },
+            );
+
+            let kb = InlineKeyboardMarkup::new(vec![
+                vec![InlineKeyboardButton::callback(
+                    format!("MAX ({bal_fmt})"),
+                    "s:max",
+                )],
+                vec![InlineKeyboardButton::callback("❌ Cancel", "cb:menu")],
+            ]);
+
+            let to_token = state.token_by_key(to_key);
+            edit(
+                &bot,
+                chat_id,
+                message_id,
+                &format!(
+                    "<b>🔄 Swap {from} → {to}</b>\n\n\
+                     Available: {pfx}{bal_fmt} {from}\n\n\
+                     Enter the amount to swap:",
+                    from = from_token.symbol,
+                    to = to_token.symbol,
+                    pfx = from_token.prefix,
+                ),
+                kb,
+            )
+            .await;
+        }
+
+        "s:max" => {
+            super::swap::handle_max_callback(&bot, &state, chat_id, message_id, user_id)
+                .await
+                .ok();
+        }
+
+        "s:ok" => {
+            if let Some((_, pending)) = state.pending_swaps.remove(&user_id) {
+                super::swap::execute(&bot, &state, chat_id, message_id, user_id, &pending).await;
+            }
+        }
+
+        "s:no" => {
+            state.conversations.remove(&user_id);
+            state.pending_swaps.remove(&user_id);
+            let (text, kb) = menu_view(&state, user_id).await;
+            edit(&bot, chat_id, message_id, &text, kb).await;
+        }
+
+        // ── Withdraw ───────────────────────────────────────────
         "cb:withdraw:near" | "cb:withdraw:usdc" => {
             let token_key = if data == "cb:withdraw:near" {
                 "near"
@@ -137,7 +230,10 @@ async fn execute_withdrawal(
             bot,
             chat_id,
             message_id,
-            &format!("❌ Insufficient balance: {}{bal_fmt} {}", token.prefix, token.symbol),
+            &format!(
+                "❌ Insufficient balance: {}{bal_fmt} {}",
+                token.prefix, token.symbol
+            ),
             InlineKeyboardMarkup::new(vec![vec![super::back_button()]]),
         )
         .await;
@@ -156,22 +252,21 @@ async fn execute_withdrawal(
         .await
     {
         Ok(_) => {
-            let text = format!(
-                "<b>✅ Withdrawal sent</b>\n\n\
-                 Amount: <b>{pfx}{display}</b> {sym}\n\
-                 To: <code>{addr}</code>\n\
-                 Network: {chain}",
-                pfx = token.prefix,
-                display = pending.amount_display,
-                sym = token.symbol,
-                addr = pending.address,
-                chain = pending.chain,
-            );
             edit(
                 bot,
                 chat_id,
                 message_id,
-                &text,
+                &format!(
+                    "<b>✅ Withdrawal sent</b>\n\n\
+                     Amount: <b>{pfx}{display}</b> {sym}\n\
+                     To: <code>{addr}</code>\n\
+                     Network: {chain}",
+                    pfx = token.prefix,
+                    display = pending.amount_display,
+                    sym = token.symbol,
+                    addr = pending.address,
+                    chain = pending.chain,
+                ),
                 InlineKeyboardMarkup::new(vec![vec![super::back_button()]]),
             )
             .await;

@@ -1,4 +1,5 @@
 /target
+contract/target
 .env
 *.swp
 *.swo

@@ -1,5 +1,6 @@
 pub mod callback;
 pub mod start;
+pub mod swap;
 pub mod tip;
 pub mod withdraw;
 
@@ -11,12 +12,12 @@ use crate::outlayer::format_amount;
 
 #[derive(Clone, Debug)]
 pub struct TokenConfig {
-    pub contract: String,    // NEP-141 contract ID
-    pub symbol: String,      // "NEAR" or "USDC"
-    pub decimals: u32,       // 24 for wNEAR, 6 for USDC
-    pub display_dp: u32,     // display decimal places (4 for NEAR, 2 for USDC)
-    pub dust: u128,          // dust threshold for adjust_for_dust
-    pub prefix: &'static str, // "$" for USDC, "" for NEAR
+    pub contract: String,
+    pub symbol: String,
+    pub decimals: u32,
+    pub display_dp: u32,
+    pub dust: u128,
+    pub prefix: &'static str,
 }
 
 // ── Conversation state ─────────────────────────────────────────────
@@ -25,6 +26,7 @@ pub struct TokenConfig {
 pub enum ConvoState {
     WithdrawAddress { token_key: String },
     WithdrawAmount { token_key: String, address: String, chain: String },
+    SwapAmount { from_key: String, to_key: String },
 }
 
 #[derive(Clone, Debug)]
@@ -32,6 +34,14 @@ pub struct PendingWithdrawal {
     pub token_key: String,
     pub address: String,
     pub chain: String,
+    pub amount_raw: String,
+    pub amount_display: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingSwap {
+    pub from_key: String,
+    pub to_key: String,
     pub amount_raw: String,
     pub amount_display: String,
 }
@@ -141,6 +151,7 @@ pub fn main_menu_keyboard() -> InlineKeyboardMarkup {
             InlineKeyboardButton::callback("💰 Balance", "cb:balance"),
             InlineKeyboardButton::callback("📥 Deposit", "cb:deposit"),
         ],
+        vec![InlineKeyboardButton::callback("🔄 Swap", "cb:swap")],
         vec![
             InlineKeyboardButton::callback("📤 Withdraw NEAR", "cb:withdraw:near"),
             InlineKeyboardButton::callback("📤 Withdraw USDC", "cb:withdraw:usdc"),

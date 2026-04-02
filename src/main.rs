@@ -9,7 +9,7 @@ use teloxide::prelude::*;
 use teloxide::types::{BotCommand, BotCommandScope, ReplyParameters};
 use teloxide::utils::command::BotCommands;
 
-use handlers::{ConvoState, PendingWithdrawal, TokenConfig, HTML};
+use handlers::{ConvoState, PendingSwap, PendingWithdrawal, TokenConfig, HTML};
 use outlayer::OutlayerClient;
 
 pub struct AppState {
@@ -21,6 +21,7 @@ pub struct AppState {
     pub rate_limiter: DashMap<u64, Instant>,
     pub conversations: DashMap<u64, ConvoState>,
     pub pending_withdrawals: DashMap<u64, PendingWithdrawal>,
+    pub pending_swaps: DashMap<u64, PendingSwap>,
 }
 
 impl AppState {
@@ -126,6 +127,7 @@ async fn main() {
         rate_limiter: DashMap::new(),
         conversations: DashMap::new(),
         pending_withdrawals: DashMap::new(),
+        pending_swaps: DashMap::new(),
     });
 
     let handler = dptree::entry()

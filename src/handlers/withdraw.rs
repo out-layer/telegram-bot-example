@@ -30,6 +30,9 @@ pub async fn handle_text(bot: Bot, msg: Message, state: Arc<AppState>) -> Respon
             address,
             chain,
         } => handle_amount(&bot, &msg, &state, user_id, &token_key, &address, &chain).await,
+        ConvoState::SwapAmount { .. } => {
+            super::swap::handle_text(&bot, &msg, &state, user_id).await
+        }
     }
 }
 

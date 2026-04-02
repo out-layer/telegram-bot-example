@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-near-sdk = "5.5"
+near-sdk = { version = "= 5.17.2", features = ["legacy"] }
+borsh = { version = "1.5", features = ["derive"] }
 
 [profile.release]
 codegen-units = 1

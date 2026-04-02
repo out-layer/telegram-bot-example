@@ -256,6 +256,28 @@ impl OutlayerClient {
         .await
     }
 
+    /// Gasless swap via intents solver relay.
+    pub async fn swap(
+        &self,
+        tg_user_id: u64,
+        token_in: &str,
+        token_out: &str,
+        amount: &str,
+    ) -> Result<serde_json::Value, String> {
+        let seed = self.seed_for_user(tg_user_id);
+        self.request(
+            &seed,
+            "POST",
+            "/wallet/v1/intents/swap",
+            Some(serde_json::json!({
+                "token_in": token_in,
+                "token_out": token_out,
+                "amount": amount,
+            })),
+        )
+        .await
+    }
+
     pub async fn get_address(&self, tg_user_id: u64, chain: &str) -> Result<String, String> {
         let seed = self.seed_for_user(tg_user_id);
         let resp = self
