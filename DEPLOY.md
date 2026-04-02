@@ -3,32 +3,79 @@
 ## Prerequisites
 
 - Rust toolchain (`rustup`)
+- `cargo-near` (`cargo install cargo-near`)
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather))
 - A NEAR account with at least one ed25519 access key
 - The NEAR account's private key in `ed25519:<base58>` format
 
-## 1. Build
+## 1. Build the bot
 
 ```bash
 cargo build --release
 ```
 
-Binary: `target/release/outlayer-tipbot` (~15 MB, statically linked except libc).
+Binary: `target/release/outlayer-tipbot`.
 
 ### Cross-compile for Linux (from macOS)
 
 ```bash
-rustup target add x86_64-unknown-linux-gnu
-cargo build --release --target x86_64-unknown-linux-gnu
+docker run --rm -v "$PWD":/app -w /app rust:1.86 cargo build --release
 ```
 
-Or use Docker:
+## 2. Build and deploy the deposit contract
 
 ```bash
-docker run --rm -v "$PWD":/app -w /app rust:1.82 cargo build --release
+cd contract
+./build.sh
 ```
 
-## 2. Configure
+Output: `contract/res/deposit_helper.wasm`
+
+### Deploy to mainnet
+
+```bash
+# Deploy
+near contract deploy deposit.tipbot.near use-file res/deposit_helper.wasm \
+  without-init-call network-config mainnet sign-with-keychain send
+
+# Initialize
+near contract call-function as-transaction deposit.tipbot.near new \
+  json-args '{"wrap_near":"wrap.near","intents":"intents.near"}' \
+  prepaid-gas '30.0 Tgas' attached-deposit '0 NEAR' \
+  sign-as deposit.tipbot.near network-config mainnet sign-with-keychain send
+
+# Register storage on wrap.near (one-time)
+near contract call-function as-transaction wrap.near storage_deposit \
+  json-args '{"account_id":"deposit.tipbot.near"}' \
+  prepaid-gas '30.0 Tgas' attached-deposit '0.00125 NEAR' \
+  sign-as deposit.tipbot.near network-config mainnet sign-with-keychain send
+```
+
+Optional: add a function-call-only key for the contract account:
+
+```bash
+near account add-key deposit.tipbot.near \
+  grant-function-call-access --allowance unlimited \
+  --contract-account-id deposit.tipbot.near \
+  --function-names register autogenerate-new-keypair \
+  save-to-legacy-keychain network-config mainnet sign-with-keychain send
+```
+
+### Pause/resume deposits
+
+```bash
+# Pause
+near contract call-function as-transaction deposit.tipbot.near set_deposits_enabled \
+  json-args '{"enabled":false}' prepaid-gas '10.0 Tgas' attached-deposit '0 NEAR' \
+  sign-as deposit.tipbot.near network-config mainnet sign-with-keychain send
+
+# Resume
+near contract call-function as-transaction deposit.tipbot.near set_deposits_enabled \
+  json-args '{"enabled":true}' prepaid-gas '10.0 Tgas' attached-deposit '0 NEAR' \
+  sign-as deposit.tipbot.near network-config mainnet sign-with-keychain send
+```
+
+## 3. Configure the bot
 
 Create `.env` on the target server (or set env vars directly):
 
@@ -37,17 +84,33 @@ TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
 NEAR_ACCOUNT_ID=my-tipbot.near
 NEAR_PRIVATE_KEY=ed25519:5Kxz...
 OUTLAYER_API=https://api.outlayer.fastnear.com
-TIP_TOKEN=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1
-TIP_DECIMALS=6
+
+# Tokens
+WNEAR_TOKEN=wrap.near
+USDC_TOKEN=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1
+
+# Deposit helper contract
+DEPOSIT_CONTRACT=deposit.tipbot.near
+
 RUST_LOG=outlayer_tipbot=info
 ```
+
+For **testnet**:
+
+```bash
+WNEAR_TOKEN=wrap.testnet
+USDC_TOKEN=usdc.fakes.testnet
+DEPOSIT_CONTRACT=deposit.tipbot.testnet
+```
+
+Decimals are hardcoded: 24 for wNEAR, 6 for USDC.
 
 **Security:**
 - `.env` must be readable only by the bot user: `chmod 600 .env`
 - `NEAR_PRIVATE_KEY` is the only secret. It controls all user wallets. Protect it.
 - Consider using a dedicated NEAR account with a single full-access key for the bot.
 
-## 3. Run
+## 4. Run
 
 ### Direct
 
@@ -94,7 +157,7 @@ sudo journalctl -u outlayer-tipbot -f
 ### Docker
 
 ```dockerfile
-FROM rust:1.82 AS builder
+FROM rust:1.86 AS builder
 WORKDIR /app
 COPY . .
 RUN cargo build --release
@@ -110,17 +173,19 @@ docker build -t outlayer-tipbot .
 docker run -d --name tipbot --env-file .env --restart always outlayer-tipbot
 ```
 
-## 4. Verify
+## 5. Verify
 
 1. Open Telegram, DM the bot, send `/start`
-2. You should see the main menu with your balance ($0.00)
-3. Tap "Deposit" — you should see a NEAR hex address
-4. Send some testnet USDC to that address
-5. Tap "Balance" → "Refresh" — balance should update
-6. Add the bot to a test group, reply to a message with `/near 0.01`
-7. Check that the tip goes through and the recipient gets a DM
+2. You should see the main menu with both balances (NEAR: 0.0000, USDC: $0.00)
+3. Tap "Deposit" — see intents address for USDC and `near call` command for NEAR
+4. Deposit some tokens
+5. Tap "Balance" → "Refresh" — balances should update
+6. Try "Swap" — NEAR to USDC or vice versa
+7. Add the bot to a test group, reply to a message with `/near 0.01` or `/usd 0.01`
+8. Check that the tip goes through and the recipient gets a DM
+9. Try "Withdraw NEAR" / "Withdraw USDC" — multi-step flow with confirmation
 
-## 5. Updating
+## 6. Updating
 
 ```bash
 git pull
@@ -129,7 +194,7 @@ sudo cp target/release/outlayer-tipbot /opt/outlayer-tipbot/
 sudo systemctl restart outlayer-tipbot
 ```
 
-## 6. Monitoring
+## 7. Monitoring
 
 Logs go to stdout (captured by systemd journal or Docker logs).
 
@@ -143,7 +208,7 @@ docker logs -f tipbot
 
 Set `RUST_LOG=outlayer_tipbot=debug` for verbose output (all API calls logged).
 
-## 7. NEAR key rotation
+## 8. NEAR key rotation
 
 If the bot's NEAR key is compromised:
 
