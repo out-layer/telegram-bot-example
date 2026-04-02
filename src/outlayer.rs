@@ -221,14 +221,14 @@ impl OutlayerClient {
     pub async fn reclaim_payment_check(
         &self,
         tg_user_id: u64,
-        check_key: &str,
+        check_id: &str,
     ) -> Result<serde_json::Value, String> {
         let seed = self.seed_for_user(tg_user_id);
         self.request(
             &seed,
             "POST",
             "/wallet/v1/payment-check/reclaim",
-            Some(serde_json::json!({ "check_key": check_key })),
+            Some(serde_json::json!({ "check_id": check_id })),
         )
         .await
     }
@@ -270,9 +270,9 @@ impl OutlayerClient {
             "POST",
             "/wallet/v1/intents/swap",
             Some(serde_json::json!({
-                "token_in": token_in,
-                "token_out": token_out,
-                "amount": amount,
+                "token_in": format!("nep141:{token_in}"),
+                "token_out": format!("nep141:{token_out}"),
+                "amount_in": amount,
             })),
         )
         .await

@@ -159,7 +159,7 @@ pub async fn handle(
     let display = format_amount(&amount_str, token.decimals, token.display_dp);
 
     // Create payment check
-    let (_check_id, check_key) = match state
+    let (check_id, check_key) = match state
         .outlayer
         .create_payment_check(
             sender.id.0,
@@ -202,7 +202,7 @@ pub async fn handle(
     if !claimed {
         let _ = state
             .outlayer
-            .reclaim_payment_check(sender.id.0, &check_key)
+            .reclaim_payment_check(sender.id.0, &check_id)
             .await;
         reply!(bot, msg, "Tip failed. Funds returned to sender.");
         return Ok(());
