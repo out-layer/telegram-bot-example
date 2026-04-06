@@ -151,7 +151,11 @@ fn display_name(user: &teloxide::types::User) -> String {
     user.username
         .as_ref()
         .map(|u| format!("@{u}"))
-        .unwrap_or_else(|| user.first_name.clone())
+        .unwrap_or_else(|| escape_html(&user.first_name))
+}
+
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 fn game_token<'a>(state: &'a AppState, token_key: &str) -> &'a TokenConfig {
@@ -268,7 +272,7 @@ fn rolling_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) ->
     (text, dice_refresh_kb(game.game_id))
 }
 
-fn results_message(game: &DiceGame, token: &TokenConfig, winners: &[&GamePlayer], prize_each: &str) -> String {
+fn results_message(game: &DiceGame, token: &TokenConfig, winners: &[&GamePlayer], prize_each: &str, fee_pct: u8) -> String {
     let stake_fmt = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
     let stake_display = trim_zeros(&stake_fmt);
     let prize_fmt = format_amount(prize_each, token.decimals, token.display_dp);
@@ -300,9 +304,15 @@ fn results_message(game: &DiceGame, token: &TokenConfig, winners: &[&GamePlayer]
         )
     };
 
+    let fee_line = if fee_pct > 0 {
+        format!("\nFee: {fee_pct}%")
+    } else {
+        String::new()
+    };
+
     format!(
         "🎲 <b>Dice Game{dt} — Results!</b>\n\
-         Bet: {prefix}{stake_display} {symbol}\n\n\
+         Bet: {prefix}{stake_display} {symbol}{fee_line}\n\n\
          {players}\n\n\
          {winner_text}",
         prefix = token.prefix,
@@ -703,7 +713,7 @@ pub async fn handle_dice_roll(
     };
 
     // Mutate under the guard, compute text + should_resolve, then drop guard before I/O
-    let (text, kb, should_resolve, game_msg_id) = {
+    let (text, kb, should_resolve, game_msg_id, player_name) = {
         let mut game = match state.dice_games.get_mut(&game_id) {
             Some(g) => g,
             None => return Ok(()),
@@ -726,6 +736,7 @@ pub async fn handle_dice_roll(
         }
 
         player.dice_value = Some(dice_value);
+        let pname = player.display_name.clone();
 
         let token = game_token(&state, &game.token_key);
         let remaining = game.rolling_deadline.unwrap_or(0).saturating_sub(now_ts());
@@ -733,10 +744,14 @@ pub async fn handle_dice_roll(
         let should_resolve = game.players.iter().all(|p| p.dice_value.is_some());
         let mid = game.message_id;
 
-        (text, kb, should_resolve, mid)
+        (text, kb, should_resolve, mid, pname)
     }; // guard dropped — now safe to do I/O
 
     edit_game_msg(&bot, chat_id, game_msg_id, &text, kb).await;
+
+    let _ = bot.send_message(ChatId(chat_id), format!("🎲 {player_name} rolled: {dice_value}"))
+        .reply_parameters(ReplyParameters::new(msg.id))
+        .await;
 
     persist_games(&state);
 
@@ -929,7 +944,14 @@ async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
         .collect();
 
     let total_pot: u128 = game.players.iter().map(|p| p.stake_raw.parse::<u128>().unwrap_or(0)).sum();
-    let prize_each = total_pot / winners.len() as u128;
+    let fee_pct = state.dice_fee;
+    let fee_amount = if fee_pct > 0 && game.players.len() >= 2 {
+        total_pot * fee_pct as u128 / 100
+    } else {
+        0
+    };
+    let distributable = total_pot - fee_amount;
+    let prize_each = distributable / winners.len() as u128;
     let prize_each_str = prize_each.to_string();
 
     // Distribute funds
@@ -970,7 +992,7 @@ async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
     }
 
     // Update original message + send new message with results
-    let text = results_message(&game, token, &winners, &prize_each_str);
+    let text = results_message(&game, token, &winners, &prize_each_str, fee_pct);
     let _ = bot
         .edit_message_text(
             ChatId(game.chat_id),

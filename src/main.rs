@@ -39,6 +39,7 @@ pub struct AppState {
     pub dice_max_near: u128,
     pub dice_min_usdc: u128,
     pub dice_max_usdc: u128,
+    pub dice_fee: u8, // 0-100 percent taken from pot
     pub dice_demo: bool,
 }
 
@@ -131,6 +132,11 @@ async fn main() {
         .unwrap_or(120);
     let dice_games_file = std::env::var("DICE_GAMES_FILE")
         .unwrap_or_else(|_| "./dice_games.json".into());
+    let dice_fee: u8 = std::env::var("DICE_FEE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+        .min(100);
     let dice_demo = std::env::var("DICE_DEMO")
         .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -197,6 +203,7 @@ async fn main() {
         dice_max_near,
         dice_min_usdc,
         dice_max_usdc,
+        dice_fee,
         dice_demo,
     });
 
