@@ -170,6 +170,18 @@ fn stake_limits(state: &AppState, token_key: &str) -> (u128, u128) {
     }
 }
 
+fn format_duration(secs: u64) -> String {
+    let mins = secs / 60;
+    let s = secs % 60;
+    if mins > 0 && s > 0 {
+        format!("{mins} min {s} sec")
+    } else if mins > 0 {
+        if mins == 1 { "1 minute".into() } else { format!("{mins} minutes") }
+    } else {
+        format!("{s} sec")
+    }
+}
+
 fn demo_tag(game: &DiceGame) -> &'static str {
     if game.demo { " [DEMO]" } else { "" }
 }
@@ -893,7 +905,11 @@ async fn handle_betting_timeout(bot: &Bot, state: &Arc<AppState>, game_id: GameI
         let _ = bot
             .send_message(
                 ChatId(game_snapshot.chat_id),
-                format!("🎲 Bets are closed! Roll your dice!\n{}", players_mention.join(" ")),
+                format!(
+                    "🎲 Bets are closed! Roll your dice!\n{}\nYou have {} to roll.",
+                    players_mention.join(" "),
+                    format_duration(state.dice_rolling_timeout),
+                ),
             )
             .await;
 
