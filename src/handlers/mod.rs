@@ -1,4 +1,5 @@
 pub mod callback;
+pub mod dice;
 pub mod start;
 pub mod swap;
 pub mod tip;

@@ -52,6 +52,14 @@ pub async fn handle(
         }
     };
 
+    // If replying to a bot's dice game message, route to join game
+    if reply.from.as_ref().map(|u| u.is_bot).unwrap_or(false) {
+        let key = (msg.chat.id.0, reply.id.0);
+        if state.dice_msg_index.contains_key(&key) {
+            return super::dice::join_game(bot, msg, state, args, token).await;
+        }
+    }
+
     let sender = match &msg.from {
         Some(u) => u,
         None => return Ok(()),
