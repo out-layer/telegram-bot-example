@@ -709,7 +709,18 @@ pub async fn handle_dice_roll(
 ) -> ResponseResult<()> {
     let game_id = match state.dice_player_index.get(&(chat_id, user_id)) {
         Some(id) => *id,
-        None => return Ok(()), // Not a game participant
+        None => {
+            // Check if there's an active rolling game in this chat — tell non-participant
+            let has_rolling = state.dice_games.iter().any(|e| {
+                e.value().chat_id == chat_id && e.value().phase == GamePhase::Rolling
+            });
+            if has_rolling {
+                let _ = bot.send_message(ChatId(chat_id), "🎲 You're not in this game!")
+                    .reply_parameters(ReplyParameters::new(msg.id))
+                    .await;
+            }
+            return Ok(());
+        }
     };
 
     // Mutate under the guard, compute text + should_resolve, then drop guard before I/O
@@ -757,6 +768,7 @@ pub async fn handle_dice_roll(
 
     if should_resolve {
         let _ = bot.send_message(ChatId(chat_id), "🎲 All players rolled! Calculating results...")
+            .reply_parameters(ReplyParameters::new(msg.id))
             .await;
         tokio::time::sleep(Duration::from_secs(5)).await;
         resolve_game(&bot, &state, game_id).await;
@@ -772,11 +784,12 @@ async fn handle_double_roll(
     player_name: &str,
 ) -> ResponseResult<()> {
     let _ = bot.delete_message(ChatId(chat_id), dice_msg_id).await;
-    bot.send_message(
+    // Can't reply to deleted message, so just send
+    let _ = bot.send_message(
         ChatId(chat_id),
         format!("🎲 {player_name} already rolled! Only the first roll counts."),
     )
-    .await?;
+    .await;
     Ok(())
 }
 
