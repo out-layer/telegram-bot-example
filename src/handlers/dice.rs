@@ -532,6 +532,17 @@ pub async fn start_game(
 
 // ── Join game ─────────────────────────────────────────────────────
 
+pub fn find_active_betting_game(state: &AppState, chat_id: i64, token_key: &str) -> Option<GameId> {
+    state.dice_games.iter().find_map(|e| {
+        let g = e.value();
+        if g.chat_id == chat_id && g.phase == GamePhase::Betting && g.token_key == token_key {
+            Some(g.game_id)
+        } else {
+            None
+        }
+    })
+}
+
 pub async fn join_game(
     bot: Bot,
     msg: Message,
@@ -540,13 +551,22 @@ pub async fn join_game(
     token: &TokenConfig,
 ) -> ResponseResult<()> {
     let reply = msg.reply_to_message().unwrap();
-    let chat_id = msg.chat.id.0;
-    let reply_msg_id = reply.id.0;
-
-    let game_id = match state.dice_msg_index.get(&(chat_id, reply_msg_id)) {
+    let game_id = match state.dice_msg_index.get(&(msg.chat.id.0, reply.id.0)) {
         Some(id) => *id,
         None => return Ok(()),
     };
+    join_game_by_id(bot, msg, state, args, token, game_id).await
+}
+
+pub async fn join_game_by_id(
+    bot: Bot,
+    msg: Message,
+    state: Arc<AppState>,
+    args: String,
+    token: &TokenConfig,
+    game_id: GameId,
+) -> ResponseResult<()> {
+    let chat_id = msg.chat.id.0;
 
     let sender = match &msg.from {
         Some(u) => u,
@@ -657,7 +677,7 @@ pub async fn join_game(
     };
 
     // Atomically check phase + already joined + push player
-    let (text, kb) = {
+    let (text, kb, game_msg_id) = {
         let mut game = match state.dice_games.get_mut(&game_id) {
             Some(g) => g,
             None => return Ok(()),
@@ -692,10 +712,12 @@ pub async fn join_game(
         });
 
         let remaining = game.betting_deadline.saturating_sub(now_ts());
-        betting_message(&game, game_token_cfg, remaining)
+        let mid = game.message_id;
+        let (text, kb) = betting_message(&game, game_token_cfg, remaining);
+        (text, kb, mid)
     }; // guard dropped
 
-    edit_game_msg(&bot, chat_id, reply_msg_id, &text, kb).await;
+    edit_game_msg(&bot, chat_id, game_msg_id, &text, kb).await;
 
     persist_games(&state);
 

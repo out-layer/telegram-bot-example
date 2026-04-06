@@ -37,6 +37,16 @@ pub async fn handle(
         return Ok(());
     }
 
+    // If there's an active betting game in this chat matching the token, join it
+    // (works with or without reply)
+    if !msg.chat.is_private() {
+        let chat_id = msg.chat.id.0;
+        let token_key = if token.symbol == "NEAR" { "near" } else { "usdc" };
+        if let Some(game_id) = super::dice::find_active_betting_game(&state, chat_id, token_key) {
+            return super::dice::join_game_by_id(bot, msg, state, args, token, game_id).await;
+        }
+    }
+
     let reply = match msg.reply_to_message() {
         Some(r) => r,
         None => {
