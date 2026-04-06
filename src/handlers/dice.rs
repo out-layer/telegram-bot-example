@@ -741,6 +741,9 @@ pub async fn handle_dice_roll(
     persist_games(&state);
 
     if should_resolve {
+        let _ = bot.send_message(ChatId(chat_id), "🎲 All players rolled! Calculating results...")
+            .await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
         resolve_game(&bot, &state, game_id).await;
     }
 
