@@ -44,6 +44,8 @@ pub struct DiceGame {
     pub created_at: u64,
     pub betting_deadline: u64,
     pub rolling_deadline: Option<u64>,
+    #[serde(default)]
+    pub demo: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -163,8 +165,9 @@ fn betting_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) ->
     let mins = remaining_secs / 60;
     let secs = remaining_secs % 60;
     let cmd = token.symbol.to_lowercase();
+    let demo_tag = if game.demo { " [DEMO]" } else { "" };
     format!(
-        "🎲 <b>Dice Game — {prefix}{stake_display} {symbol}</b>\n\n\
+        "🎲 <b>Dice Game{demo_tag} — {prefix}{stake_display} {symbol}</b>\n\n\
          Bet: {prefix}{stake_display} {symbol}\n\
          Players ({count}): {players}\n\n\
          ⏳ Waiting for players... ({mins}:{secs:02})\n\
@@ -180,6 +183,7 @@ fn rolling_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) ->
     let stake_display = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
     let mins = remaining_secs / 60;
     let secs = remaining_secs % 60;
+    let demo_tag = if game.demo { " [DEMO]" } else { "" };
 
     let mut lines = Vec::new();
     for p in &game.players {
@@ -191,7 +195,7 @@ fn rolling_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) ->
     }
 
     format!(
-        "🎲 <b>Dice Game — Roll!</b>\n\
+        "🎲 <b>Dice Game{demo_tag} — Roll!</b>\n\
          Bet: {prefix}{stake_display} {symbol}\n\n\
          {players}\n\n\
          Send 🎲 to roll! ({mins}:{secs:02})",
@@ -204,6 +208,7 @@ fn rolling_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) ->
 fn results_message(game: &DiceGame, token: &TokenConfig, winners: &[&GamePlayer], prize_each: &str) -> String {
     let stake_display = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
     let prize_display = format_amount(prize_each, token.decimals, token.display_dp);
+    let demo_tag = if game.demo { " [DEMO]" } else { "" };
 
     let mut lines = Vec::new();
     for p in &game.players {
@@ -231,7 +236,7 @@ fn results_message(game: &DiceGame, token: &TokenConfig, winners: &[&GamePlayer]
     };
 
     format!(
-        "🎲 <b>Dice Game — Results!</b>\n\
+        "🎲 <b>Dice Game{demo_tag} — Results!</b>\n\
          Bet: {prefix}{stake_display} {symbol}\n\n\
          {players}\n\n\
          {winner_text}",
@@ -337,45 +342,51 @@ pub async fn start_game(
         None => return Ok(()),
     };
 
-    // Register wallet & check balance
-    if let Err(e) = state.outlayer.register_wallet(sender.id.0).await {
-        tracing::error!(user = sender.id.0, "register wallet: {e}");
-        reply!(bot, msg, "Failed to set up wallet.");
-        return Ok(());
-    }
-
-    let balance_str = match state.outlayer.get_balance(sender.id.0, &token.contract).await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!(user = sender.id.0, "get_balance: {e}");
-            reply!(bot, msg, "Failed to check balance.");
-            return Ok(());
-        }
-    };
-    let balance: u128 = balance_str.parse().unwrap_or(0);
-    if balance < amount_raw {
-        let bal_fmt = format_amount(&balance.to_string(), token.decimals, token.display_dp);
-        reply!(
-            bot,
-            msg,
-            format!("Insufficient balance: {}{bal_fmt} {}", token.prefix, token.symbol)
-        );
-        return Ok(());
-    }
-
-    // Create payment check (escrow)
+    let demo = state.dice_demo;
     let amount_str = amount_raw.to_string();
     let game_id = state.dice_next_id.fetch_add(1, Ordering::Relaxed);
-    let (check_id, check_key) = match state
-        .outlayer
-        .create_payment_check(sender.id.0, &token.contract, &amount_str, &format!("dice:{game_id}"))
-        .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(user = sender.id.0, "create_payment_check: {e}");
-            reply!(bot, msg, "Failed to lock stake. Try again.");
+
+    let (check_id, check_key) = if demo {
+        (String::new(), String::new())
+    } else {
+        // Register wallet & check balance
+        if let Err(e) = state.outlayer.register_wallet(sender.id.0).await {
+            tracing::error!(user = sender.id.0, "register wallet: {e}");
+            reply!(bot, msg, "Failed to set up wallet.");
             return Ok(());
+        }
+
+        let balance_str = match state.outlayer.get_balance(sender.id.0, &token.contract).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(user = sender.id.0, "get_balance: {e}");
+                reply!(bot, msg, "Failed to check balance.");
+                return Ok(());
+            }
+        };
+        let balance: u128 = balance_str.parse().unwrap_or(0);
+        if balance < amount_raw {
+            let bal_fmt = format_amount(&balance.to_string(), token.decimals, token.display_dp);
+            reply!(
+                bot,
+                msg,
+                format!("Insufficient balance: {}{bal_fmt} {}", token.prefix, token.symbol)
+            );
+            return Ok(());
+        }
+
+        // Create payment check (escrow)
+        match state
+            .outlayer
+            .create_payment_check(sender.id.0, &token.contract, &amount_str, &format!("dice:{game_id}"))
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(user = sender.id.0, "create_payment_check: {e}");
+                reply!(bot, msg, "Failed to lock stake. Try again.");
+                return Ok(());
+            }
         }
     };
 
@@ -400,6 +411,7 @@ pub async fn start_game(
         created_at: now,
         betting_deadline,
         rolling_deadline: None,
+        demo,
     };
 
     let text = betting_message(&game, token, state.dice_betting_timeout);
@@ -502,44 +514,47 @@ pub async fn join_game(
         return Ok(());
     }
 
-    // Register & check balance
-    if let Err(e) = state.outlayer.register_wallet(sender.id.0).await {
-        tracing::error!(user = sender.id.0, "register wallet: {e}");
-        reply!(bot, msg, "Failed to set up wallet.");
-        return Ok(());
-    }
-
-    let balance_str = match state.outlayer.get_balance(sender.id.0, &token.contract).await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!(user = sender.id.0, "get_balance: {e}");
-            reply!(bot, msg, "Failed to check balance.");
+    let stake_str = min_stake.to_string();
+    let (check_id, check_key) = if game.demo {
+        (String::new(), String::new())
+    } else {
+        // Register & check balance
+        if let Err(e) = state.outlayer.register_wallet(sender.id.0).await {
+            tracing::error!(user = sender.id.0, "register wallet: {e}");
+            reply!(bot, msg, "Failed to set up wallet.");
             return Ok(());
         }
-    };
-    let balance: u128 = balance_str.parse().unwrap_or(0);
-    // Only take min_stake, not the full typed amount
-    if balance < min_stake {
-        let bal_fmt = format_amount(&balance.to_string(), token.decimals, token.display_dp);
-        reply!(
-            bot,
-            msg,
-            format!("Insufficient balance: {}{bal_fmt} {}", token.prefix, token.symbol)
-        );
-        return Ok(());
-    }
 
-    let stake_str = min_stake.to_string();
-    let (check_id, check_key) = match state
-        .outlayer
-        .create_payment_check(sender.id.0, &token.contract, &stake_str, &format!("dice:{game_id}"))
-        .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(user = sender.id.0, "create_payment_check: {e}");
-            reply!(bot, msg, "Failed to lock stake. Try again.");
+        let balance_str = match state.outlayer.get_balance(sender.id.0, &token.contract).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(user = sender.id.0, "get_balance: {e}");
+                reply!(bot, msg, "Failed to check balance.");
+                return Ok(());
+            }
+        };
+        let balance: u128 = balance_str.parse().unwrap_or(0);
+        if balance < min_stake {
+            let bal_fmt = format_amount(&balance.to_string(), token.decimals, token.display_dp);
+            reply!(
+                bot,
+                msg,
+                format!("Insufficient balance: {}{bal_fmt} {}", token.prefix, token.symbol)
+            );
             return Ok(());
+        }
+
+        match state
+            .outlayer
+            .create_payment_check(sender.id.0, &token.contract, &stake_str, &format!("dice:{game_id}"))
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(user = sender.id.0, "create_payment_check: {e}");
+                reply!(bot, msg, "Failed to lock stake. Try again.");
+                return Ok(());
+            }
         }
     };
 
@@ -671,11 +686,13 @@ async fn handle_betting_timeout(bot: &Bot, state: &Arc<AppState>, game_id: GameI
 
     if game.players.len() < 2 {
         // Cancel — refund the single player
-        let player = &game.players[0];
-        let _ = state
-            .outlayer
-            .reclaim_payment_check(player.user_id, &player.check_id)
-            .await;
+        if !game.demo {
+            let player = &game.players[0];
+            let _ = state
+                .outlayer
+                .reclaim_payment_check(player.user_id, &player.check_id)
+                .await;
+        }
 
         let text = cancelled_message(&game, token);
         let _ = bot
@@ -772,11 +789,13 @@ async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
 
     if max_val == 0 {
         // All players scored 0 — refund everyone
-        for p in &game.players {
-            let _ = state
-                .outlayer
-                .reclaim_payment_check(p.user_id, &p.check_id)
-                .await;
+        if !game.demo {
+            for p in &game.players {
+                let _ = state
+                    .outlayer
+                    .reclaim_payment_check(p.user_id, &p.check_id)
+                    .await;
+            }
         }
 
         let text = all_zero_message(&game, token);
@@ -810,7 +829,9 @@ async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
     let prize_each_str = prize_each.to_string();
 
     // Distribute funds
-    if winners.len() == 1 {
+    if game.demo {
+        // Demo mode: no actual transfers
+    } else if winners.len() == 1 {
         // Single winner — claim all checks to winner
         let winner = winners[0];
         for p in &game.players {

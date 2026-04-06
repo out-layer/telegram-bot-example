@@ -39,6 +39,7 @@ pub struct AppState {
     pub dice_max_near: u128,
     pub dice_min_usdc: u128,
     pub dice_max_usdc: u128,
+    pub dice_demo: bool,
 }
 
 impl AppState {
@@ -130,6 +131,9 @@ async fn main() {
         .unwrap_or(120);
     let dice_games_file = std::env::var("DICE_GAMES_FILE")
         .unwrap_or_else(|_| "./dice_games.json".into());
+    let dice_demo = std::env::var("DICE_DEMO")
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     let dice_min_near = parse_amount(
         &std::env::var("DICE_MIN_NEAR").unwrap_or_else(|_| "0.1".into()), 24,
     ).unwrap_or(100_000_000_000_000_000_000_000);
@@ -193,6 +197,7 @@ async fn main() {
         dice_max_near,
         dice_min_usdc,
         dice_max_usdc,
+        dice_demo,
     });
 
     // Restore dice games from disk
