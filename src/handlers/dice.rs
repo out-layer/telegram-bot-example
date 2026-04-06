@@ -519,7 +519,10 @@ pub async fn join_game(
     let amount_raw = match parse_amount(args.trim(), token.decimals) {
         Some(a) if a > 0 => a,
         _ => {
-            let g = state.dice_games.get(&game_id).unwrap();
+            let g = match state.dice_games.get(&game_id) {
+                Some(g) => g,
+                None => return Ok(()),
+            };
             let stake_display = format_amount(&g.min_stake_raw, token.decimals, token.display_dp);
             reply!(
                 bot,
@@ -660,7 +663,7 @@ pub async fn handle_dice_roll(
     };
 
     // Mutate under the guard, compute text + should_resolve, then drop guard before I/O
-    let (text, should_resolve, game_msg_id, already_rolled) = {
+    let (text, should_resolve, game_msg_id) = {
         let mut game = match state.dice_games.get_mut(&game_id) {
             Some(g) => g,
             None => return Ok(()),
@@ -678,9 +681,8 @@ pub async fn handle_dice_roll(
         // Double-roll detection
         if player.dice_value.is_some() {
             let name = player.display_name.clone();
-            let mid = game.message_id;
             drop(game);
-            return handle_double_roll(&bot, chat_id, msg.id, mid, &name).await;
+            return handle_double_roll(&bot, chat_id, msg.id, &name).await;
         }
 
         player.dice_value = Some(dice_value);
@@ -691,12 +693,8 @@ pub async fn handle_dice_roll(
         let should_resolve = game.players.iter().all(|p| p.dice_value.is_some());
         let mid = game.message_id;
 
-        (text, should_resolve, mid, false)
+        (text, should_resolve, mid)
     }; // guard dropped — now safe to do I/O
-
-    if already_rolled {
-        return Ok(());
-    }
 
     let _ = bot
         .edit_message_text(ChatId(chat_id), teloxide::types::MessageId(game_msg_id), text)
@@ -716,7 +714,6 @@ async fn handle_double_roll(
     bot: &Bot,
     chat_id: i64,
     dice_msg_id: teloxide::types::MessageId,
-    _game_msg_id: i32,
     player_name: &str,
 ) -> ResponseResult<()> {
     let _ = bot.delete_message(ChatId(chat_id), dice_msg_id).await;
@@ -748,7 +745,7 @@ pub fn spawn_rolling_timer(bot: Bot, state: Arc<AppState>, game_id: GameId, dead
 
 async fn handle_betting_timeout(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
     // Atomically read phase and transition — prevents join race
-    let (action, game_snapshot) = {
+    let (cancelled, game_snapshot) = {
         let mut g = match state.dice_games.get_mut(&game_id) {
             Some(g) => g,
             None => return,
@@ -759,7 +756,7 @@ async fn handle_betting_timeout(bot: &Bot, state: &Arc<AppState>, game_id: GameI
 
         if g.players.len() < 2 {
             g.phase = GamePhase::Cancelled;
-            ("cancel", g.clone())
+            (true, g.clone())
         } else {
             let now = now_ts();
             let rolling_deadline = now + state.dice_rolling_timeout;
@@ -771,13 +768,13 @@ async fn handle_betting_timeout(bot: &Bot, state: &Arc<AppState>, game_id: GameI
                 state.dice_player_index.insert((g.chat_id, p.user_id), game_id);
             }
 
-            ("roll", g.clone())
+            (false, g.clone())
         }
     }; // guard dropped
 
     let token = game_token(state, &game_snapshot.token_key);
 
-    if action == "cancel" {
+    if cancelled {
         // Refund the single player
         if !game_snapshot.demo {
             let player = &game_snapshot.players[0];
