@@ -48,10 +48,19 @@ pub struct DiceGame {
     pub demo: bool,
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize)]
 pub struct DiceGameStore {
     pub games: Vec<DiceGame>,
     pub next_id: GameId,
+}
+
+impl Default for DiceGameStore {
+    fn default() -> Self {
+        Self {
+            games: Vec::new(),
+            next_id: 1,
+        }
+    }
 }
 
 // ── Persistence ───────────────────────────────────────────────────
@@ -67,16 +76,19 @@ pub fn persist_games(state: &AppState) {
     let games: Vec<DiceGame> = state
         .dice_games
         .iter()
+        .filter(|r| r.phase == GamePhase::Betting || r.phase == GamePhase::Rolling)
         .map(|r| r.value().clone())
         .collect();
     let store = DiceGameStore {
         games,
         next_id: state.dice_next_id.load(Ordering::Relaxed),
     };
-    let tmp = format!("{}.tmp", state.dice_games_file);
+    let path = &state.dice_games_file;
+    let tmp = format!("{path}.tmp");
     if let Ok(data) = serde_json::to_string_pretty(&store) {
-        let _ = std::fs::write(&tmp, &data);
-        let _ = std::fs::rename(&tmp, &state.dice_games_file);
+        if std::fs::write(&tmp, &data).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
     }
 }
 
@@ -86,6 +98,11 @@ pub fn restore_games(state: &Arc<AppState>, bot: &Bot) {
     let now = now_ts();
 
     for game in store.games {
+        // Only restore active games
+        if game.phase != GamePhase::Betting && game.phase != GamePhase::Rolling {
+            continue;
+        }
+
         let game_id = game.game_id;
         let chat_id = game.chat_id;
         let msg_id = game.message_id;
@@ -149,6 +166,24 @@ fn stake_limits(state: &AppState, token_key: &str) -> (u128, u128) {
     }
 }
 
+fn demo_tag(game: &DiceGame) -> &'static str {
+    if game.demo { " [DEMO]" } else { "" }
+}
+
+async fn claim_with_retry(state: &AppState, user_id: u64, check_key: &str, game_id: GameId) {
+    for attempt in 0..3u32 {
+        match state.outlayer.claim_payment_check(user_id, check_key).await {
+            Ok(_) => return,
+            Err(e) => {
+                tracing::warn!(game_id, attempt, "claim check: {e}");
+                if attempt < 2 {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+    }
+}
+
 macro_rules! reply {
     ($bot:expr, $msg:expr, $text:expr) => {
         $bot.send_message($msg.chat.id, $text)
@@ -165,9 +200,9 @@ fn betting_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) ->
     let mins = remaining_secs / 60;
     let secs = remaining_secs % 60;
     let cmd = token.symbol.to_lowercase();
-    let demo_tag = if game.demo { " [DEMO]" } else { "" };
+    let dt = demo_tag(game);
     format!(
-        "🎲 <b>Dice Game{demo_tag} — {prefix}{stake_display} {symbol}</b>\n\n\
+        "🎲 <b>Dice Game{dt} — {prefix}{stake_display} {symbol}</b>\n\n\
          Bet: {prefix}{stake_display} {symbol}\n\
          Players ({count}): {players}\n\n\
          ⏳ Waiting for players... ({mins}:{secs:02})\n\
@@ -183,7 +218,7 @@ fn rolling_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) ->
     let stake_display = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
     let mins = remaining_secs / 60;
     let secs = remaining_secs % 60;
-    let demo_tag = if game.demo { " [DEMO]" } else { "" };
+    let dt = demo_tag(game);
 
     let mut lines = Vec::new();
     for p in &game.players {
@@ -195,7 +230,7 @@ fn rolling_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) ->
     }
 
     format!(
-        "🎲 <b>Dice Game{demo_tag} — Roll!</b>\n\
+        "🎲 <b>Dice Game{dt} — Roll!</b>\n\
          Bet: {prefix}{stake_display} {symbol}\n\n\
          {players}\n\n\
          Send 🎲 to roll! ({mins}:{secs:02})",
@@ -208,7 +243,7 @@ fn rolling_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) ->
 fn results_message(game: &DiceGame, token: &TokenConfig, winners: &[&GamePlayer], prize_each: &str) -> String {
     let stake_display = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
     let prize_display = format_amount(prize_each, token.decimals, token.display_dp);
-    let demo_tag = if game.demo { " [DEMO]" } else { "" };
+    let dt = demo_tag(game);
 
     let mut lines = Vec::new();
     for p in &game.players {
@@ -236,7 +271,7 @@ fn results_message(game: &DiceGame, token: &TokenConfig, winners: &[&GamePlayer]
     };
 
     format!(
-        "🎲 <b>Dice Game{demo_tag} — Results!</b>\n\
+        "🎲 <b>Dice Game{dt} — Results!</b>\n\
          Bet: {prefix}{stake_display} {symbol}\n\n\
          {players}\n\n\
          {winner_text}",
@@ -249,8 +284,9 @@ fn results_message(game: &DiceGame, token: &TokenConfig, winners: &[&GamePlayer]
 fn cancelled_message(game: &DiceGame, token: &TokenConfig) -> String {
     let stake_display = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
     let creator = &game.players[0].display_name;
+    let dt = demo_tag(game);
     format!(
-        "🎲 <b>Dice Game — Cancelled</b>\n\n\
+        "🎲 <b>Dice Game{dt} — Cancelled</b>\n\n\
          No one joined. {prefix}{stake_display} {symbol} returned to {creator}.",
         prefix = token.prefix,
         symbol = token.symbol,
@@ -259,8 +295,9 @@ fn cancelled_message(game: &DiceGame, token: &TokenConfig) -> String {
 
 fn all_zero_message(game: &DiceGame, token: &TokenConfig) -> String {
     let stake_display = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
+    let dt = demo_tag(game);
     format!(
-        "🎲 <b>Dice Game — No Winners</b>\n\
+        "🎲 <b>Dice Game{dt} — No Winners</b>\n\
          Bet: {prefix}{stake_display} {symbol}\n\n\
          Nobody rolled! All stakes refunded.",
         prefix = token.prefix,
@@ -457,19 +494,14 @@ pub async fn join_game(
         None => return Ok(()),
     };
 
-    // Read game state
-    let game = match state.dice_games.get(&game_id) {
-        Some(g) => g.clone(),
-        None => return Ok(()),
-    };
-
-    if game.phase != GamePhase::Betting {
-        reply!(bot, msg, "🎲 Betting phase is over.");
-        return Ok(());
-    }
-
-    // Check token match
-    let game_token_cfg = game_token(&state, &game.token_key);
+    // Check token match (read-only, no race concern)
+    let game_token_cfg = game_token(&state, &{
+        let g = match state.dice_games.get(&game_id) {
+            Some(g) => g,
+            None => return Ok(()),
+        };
+        g.token_key.clone()
+    });
     if token.contract != game_token_cfg.contract {
         let cmd = game_token_cfg.symbol.to_lowercase();
         reply!(
@@ -483,17 +515,12 @@ pub async fn join_game(
         return Ok(());
     }
 
-    // Already in game?
-    if game.players.iter().any(|p| p.user_id == sender.id.0) {
-        reply!(bot, msg, "🎲 You're already in this game!");
-        return Ok(());
-    }
-
-    // Parse amount
+    // Parse amount (before taking the lock)
     let amount_raw = match parse_amount(args.trim(), token.decimals) {
         Some(a) if a > 0 => a,
         _ => {
-            let stake_display = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
+            let g = state.dice_games.get(&game_id).unwrap();
+            let stake_display = format_amount(&g.min_stake_raw, token.decimals, token.display_dp);
             reply!(
                 bot,
                 msg,
@@ -503,9 +530,17 @@ pub async fn join_game(
         }
     };
 
-    let min_stake: u128 = game.min_stake_raw.parse().unwrap_or(0);
+    // Read min_stake and demo flag
+    let (min_stake, is_demo) = {
+        let g = match state.dice_games.get(&game_id) {
+            Some(g) => g,
+            None => return Ok(()),
+        };
+        (g.min_stake_raw.parse::<u128>().unwrap_or(0), g.demo)
+    };
+
     if amount_raw < min_stake {
-        let stake_display = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
+        let stake_display = format_amount(&min_stake.to_string(), token.decimals, token.display_dp);
         reply!(
             bot,
             msg,
@@ -515,7 +550,7 @@ pub async fn join_game(
     }
 
     let stake_str = min_stake.to_string();
-    let (check_id, check_key) = if game.demo {
+    let (check_id, check_key) = if is_demo {
         (String::new(), String::new())
     } else {
         // Register & check balance
@@ -558,10 +593,32 @@ pub async fn join_game(
         }
     };
 
-    // Update game
-    let now = now_ts();
-    {
-        let mut game = state.dice_games.get_mut(&game_id).unwrap();
+    // Atomically check phase + already joined + push player
+    let text = {
+        let mut game = match state.dice_games.get_mut(&game_id) {
+            Some(g) => g,
+            None => return Ok(()),
+        };
+
+        if game.phase != GamePhase::Betting {
+            drop(game);
+            // Refund if we already created the check
+            if !is_demo {
+                let _ = state.outlayer.reclaim_payment_check(sender.id.0, &check_id).await;
+            }
+            reply!(bot, msg, "🎲 Betting phase is over.");
+            return Ok(());
+        }
+
+        if game.players.iter().any(|p| p.user_id == sender.id.0) {
+            drop(game);
+            if !is_demo {
+                let _ = state.outlayer.reclaim_payment_check(sender.id.0, &check_id).await;
+            }
+            reply!(bot, msg, "🎲 You're already in this game!");
+            return Ok(());
+        }
+
         game.players.push(GamePlayer {
             user_id: sender.id.0,
             display_name: display_name(sender),
@@ -571,14 +628,14 @@ pub async fn join_game(
             dice_value: None,
         });
 
-        // Update announcement
-        let remaining = game.betting_deadline.saturating_sub(now);
-        let text = betting_message(&game, game_token_cfg, remaining);
-        let _ = bot
-            .edit_message_text(ChatId(chat_id), teloxide::types::MessageId(game.message_id), text)
-            .parse_mode(HTML)
-            .await;
-    }
+        let remaining = game.betting_deadline.saturating_sub(now_ts());
+        betting_message(&game, game_token_cfg, remaining)
+    }; // guard dropped
+
+    let _ = bot
+        .edit_message_text(ChatId(chat_id), teloxide::types::MessageId(reply_msg_id), text)
+        .parse_mode(HTML)
+        .await;
 
     persist_games(&state);
 
@@ -602,9 +659,8 @@ pub async fn handle_dice_roll(
         None => return Ok(()), // Not a game participant
     };
 
-    let should_resolve;
-
-    {
+    // Mutate under the guard, compute text + should_resolve, then drop guard before I/O
+    let (text, should_resolve, game_msg_id, already_rolled) = {
         let mut game = match state.dice_games.get_mut(&game_id) {
             Some(g) => g,
             None => return Ok(()),
@@ -621,30 +677,31 @@ pub async fn handle_dice_roll(
 
         // Double-roll detection
         if player.dice_value.is_some() {
-            // Try to delete the duplicate dice message
-            let _ = bot.delete_message(ChatId(chat_id), msg.id).await;
-            bot.send_message(
-                ChatId(chat_id),
-                format!("🎲 {} already rolled! Only the first roll counts.", player.display_name),
-            )
-            .await?;
-            return Ok(());
+            let name = player.display_name.clone();
+            let mid = game.message_id;
+            drop(game);
+            return handle_double_roll(&bot, chat_id, msg.id, mid, &name).await;
         }
 
         player.dice_value = Some(dice_value);
 
-        // Update game message
         let token = game_token(&state, &game.token_key);
         let remaining = game.rolling_deadline.unwrap_or(0).saturating_sub(now_ts());
         let text = rolling_message(&game, token, remaining);
-        let _ = bot
-            .edit_message_text(ChatId(chat_id), teloxide::types::MessageId(game.message_id), text)
-            .parse_mode(HTML)
-            .await;
+        let should_resolve = game.players.iter().all(|p| p.dice_value.is_some());
+        let mid = game.message_id;
 
-        // Check if all rolled
-        should_resolve = game.players.iter().all(|p| p.dice_value.is_some());
+        (text, should_resolve, mid, false)
+    }; // guard dropped — now safe to do I/O
+
+    if already_rolled {
+        return Ok(());
     }
+
+    let _ = bot
+        .edit_message_text(ChatId(chat_id), teloxide::types::MessageId(game_msg_id), text)
+        .parse_mode(HTML)
+        .await;
 
     persist_games(&state);
 
@@ -652,6 +709,22 @@ pub async fn handle_dice_roll(
         resolve_game(&bot, &state, game_id).await;
     }
 
+    Ok(())
+}
+
+async fn handle_double_roll(
+    bot: &Bot,
+    chat_id: i64,
+    dice_msg_id: teloxide::types::MessageId,
+    _game_msg_id: i32,
+    player_name: &str,
+) -> ResponseResult<()> {
+    let _ = bot.delete_message(ChatId(chat_id), dice_msg_id).await;
+    bot.send_message(
+        ChatId(chat_id),
+        format!("🎲 {player_name} already rolled! Only the first roll counts."),
+    )
+    .await?;
     Ok(())
 }
 
@@ -674,108 +747,106 @@ pub fn spawn_rolling_timer(bot: Bot, state: Arc<AppState>, game_id: GameId, dead
 }
 
 async fn handle_betting_timeout(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
-    let game = match state.dice_games.get(&game_id) {
-        Some(g) => g.clone(),
-        None => return,
-    };
-    if game.phase != GamePhase::Betting {
-        return;
-    }
+    // Atomically read phase and transition — prevents join race
+    let (action, game_snapshot) = {
+        let mut g = match state.dice_games.get_mut(&game_id) {
+            Some(g) => g,
+            None => return,
+        };
+        if g.phase != GamePhase::Betting {
+            return;
+        }
 
-    let token = game_token(state, &game.token_key);
+        if g.players.len() < 2 {
+            g.phase = GamePhase::Cancelled;
+            ("cancel", g.clone())
+        } else {
+            let now = now_ts();
+            let rolling_deadline = now + state.dice_rolling_timeout;
+            g.phase = GamePhase::Rolling;
+            g.rolling_deadline = Some(rolling_deadline);
 
-    if game.players.len() < 2 {
-        // Cancel — refund the single player
-        if !game.demo {
-            let player = &game.players[0];
+            // Build player index for dice detection
+            for p in &g.players {
+                state.dice_player_index.insert((g.chat_id, p.user_id), game_id);
+            }
+
+            ("roll", g.clone())
+        }
+    }; // guard dropped
+
+    let token = game_token(state, &game_snapshot.token_key);
+
+    if action == "cancel" {
+        // Refund the single player
+        if !game_snapshot.demo {
+            let player = &game_snapshot.players[0];
             let _ = state
                 .outlayer
                 .reclaim_payment_check(player.user_id, &player.check_id)
                 .await;
         }
 
-        let text = cancelled_message(&game, token);
+        let text = cancelled_message(&game_snapshot, token);
         let _ = bot
             .edit_message_text(
-                ChatId(game.chat_id),
-                teloxide::types::MessageId(game.message_id),
+                ChatId(game_snapshot.chat_id),
+                teloxide::types::MessageId(game_snapshot.message_id),
                 text,
             )
             .parse_mode(HTML)
             .await;
 
-        cleanup_game(state, &game);
-        if let Some(mut g) = state.dice_games.get_mut(&game_id) {
-            g.phase = GamePhase::Cancelled;
-        }
+        cleanup_game(state, &game_snapshot);
         persist_games(state);
         tracing::info!(game_id, "dice game cancelled (no joiners)");
-        return;
-    }
+    } else {
+        let rolling_deadline = game_snapshot.rolling_deadline.unwrap();
 
-    // Transition to rolling phase
-    let now = now_ts();
-    let rolling_deadline = now + state.dice_rolling_timeout;
-
-    {
-        let mut g = state.dice_games.get_mut(&game_id).unwrap();
-        g.phase = GamePhase::Rolling;
-        g.rolling_deadline = Some(rolling_deadline);
-
-        // Build player index for dice detection
-        for p in &g.players {
-            state.dice_player_index.insert((g.chat_id, p.user_id), game_id);
-        }
-
-        let text = rolling_message(&g, token, state.dice_rolling_timeout);
+        let text = rolling_message(&game_snapshot, token, state.dice_rolling_timeout);
         let _ = bot
             .edit_message_text(
-                ChatId(g.chat_id),
-                teloxide::types::MessageId(g.message_id),
+                ChatId(game_snapshot.chat_id),
+                teloxide::types::MessageId(game_snapshot.message_id),
                 text,
             )
             .parse_mode(HTML)
             .await;
+
+        persist_games(state);
+
+        let _ = bot
+            .send_message(
+                ChatId(game_snapshot.chat_id),
+                "🎲 Bets are closed! Roll your dice!",
+            )
+            .await;
+
+        spawn_rolling_timer(bot.clone(), state.clone(), game_id, rolling_deadline, now_ts());
+
+        tracing::info!(game_id, "dice game moved to rolling phase");
     }
-
-    persist_games(state);
-
-    // Notify in chat
-    let _ = bot
-        .send_message(
-            ChatId(game.chat_id),
-            "🎲 Bets are closed! Roll your dice!",
-        )
-        .await;
-
-    spawn_rolling_timer(bot.clone(), state.clone(), game_id, rolling_deadline, now);
-
-    tracing::info!(game_id, "dice game moved to rolling phase");
 }
 
 async fn handle_rolling_timeout(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
-    let game = match state.dice_games.get(&game_id) {
-        Some(g) => g.clone(),
-        None => return,
-    };
-    if game.phase != GamePhase::Rolling {
-        return;
-    }
-
     resolve_game(bot, state, game_id).await;
 }
 
 // ── Resolve game ──────────────────────────────────────────────────
 
 async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
-    let game = match state.dice_games.get(&game_id) {
-        Some(g) => g.clone(),
-        None => return,
-    };
-
-    if game.phase != GamePhase::Rolling {
-        return;
-    }
+    // Atomically claim ownership by setting phase to Finished — prevents double resolution
+    let game = {
+        let mut g = match state.dice_games.get_mut(&game_id) {
+            Some(g) => g,
+            None => return,
+        };
+        if g.phase != GamePhase::Rolling {
+            return;
+        }
+        g.phase = GamePhase::Finished;
+        g.clone()
+    }; // guard dropped
 
     let token = game_token(state, &game.token_key);
 
@@ -809,9 +880,6 @@ async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
             .await;
 
         cleanup_game(state, &game);
-        if let Some(mut g) = state.dice_games.get_mut(&game_id) {
-            g.phase = GamePhase::Finished;
-        }
         persist_games(state);
         tracing::info!(game_id, "dice game finished: all zero, refunded");
         return;
@@ -832,44 +900,15 @@ async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
     if game.demo {
         // Demo mode: no actual transfers
     } else if winners.len() == 1 {
-        // Single winner — claim all checks to winner
         let winner = winners[0];
         for p in &game.players {
-            for attempt in 0..3u32 {
-                match state
-                    .outlayer
-                    .claim_payment_check(winner.user_id, &p.check_key)
-                    .await
-                {
-                    Ok(_) => break,
-                    Err(e) => {
-                        tracing::warn!(game_id, attempt, "claim check: {e}");
-                        if attempt < 2 {
-                            tokio::time::sleep(Duration::from_secs(2)).await;
-                        }
-                    }
-                }
-            }
+            claim_with_retry(state, winner.user_id, &p.check_key, game_id).await;
         }
     } else {
         // Multiple winners — claim all to first winner, then redistribute
         let first_winner = winners[0];
         for p in &game.players {
-            for attempt in 0..3u32 {
-                match state
-                    .outlayer
-                    .claim_payment_check(first_winner.user_id, &p.check_key)
-                    .await
-                {
-                    Ok(_) => break,
-                    Err(e) => {
-                        tracing::warn!(game_id, attempt, "claim to first winner: {e}");
-                        if attempt < 2 {
-                            tokio::time::sleep(Duration::from_secs(2)).await;
-                        }
-                    }
-                }
-            }
+            claim_with_retry(state, first_winner.user_id, &p.check_key, game_id).await;
         }
 
         // Redistribute to other winners
@@ -885,21 +924,7 @@ async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
                 .await
             {
                 Ok((_cid, ckey)) => {
-                    for attempt in 0..3u32 {
-                        match state
-                            .outlayer
-                            .claim_payment_check(winner.user_id, &ckey)
-                            .await
-                        {
-                            Ok(_) => break,
-                            Err(e) => {
-                                tracing::warn!(game_id, attempt, "split claim: {e}");
-                                if attempt < 2 {
-                                    tokio::time::sleep(Duration::from_secs(2)).await;
-                                }
-                            }
-                        }
-                    }
+                    claim_with_retry(state, winner.user_id, &ckey, game_id).await;
                 }
                 Err(e) => {
                     tracing::error!(game_id, "split create check: {e}");
@@ -920,9 +945,6 @@ async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
         .await;
 
     cleanup_game(state, &game);
-    if let Some(mut g) = state.dice_games.get_mut(&game_id) {
-        g.phase = GamePhase::Finished;
-    }
     persist_games(state);
 
     let winner_names: Vec<&str> = winners.iter().map(|w| w.display_name.as_str()).collect();
@@ -936,6 +958,5 @@ fn cleanup_game(state: &AppState, game: &DiceGame) {
     for p in &game.players {
         state.dice_player_index.remove(&(game.chat_id, p.user_id));
     }
-    // Keep game in dice_games with Finished/Cancelled phase for persistence
-    // It will be cleaned up on next restart (only active games are restored)
+    state.dice_games.remove(&game.game_id);
 }

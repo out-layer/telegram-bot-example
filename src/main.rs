@@ -188,7 +188,7 @@ async fn main() {
         dice_games: DashMap::new(),
         dice_msg_index: DashMap::new(),
         dice_player_index: DashMap::new(),
-        dice_next_id: AtomicU64::new(1),
+        dice_next_id: AtomicU64::new(1), // overwritten by restore_games if file exists
         dice_allowed_chats,
         dice_games_file,
         dice_betting_timeout,
