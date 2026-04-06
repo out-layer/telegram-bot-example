@@ -39,7 +39,8 @@ pub struct AppState {
     pub dice_max_near: u128,
     pub dice_min_usdc: u128,
     pub dice_max_usdc: u128,
-    pub dice_fee: u8, // 0-100 percent taken from pot
+    pub dice_fee: u8,            // 0-100 percent taken from pot
+    pub dice_fee_account: u64,   // tg user_id that receives fee
     pub dice_demo: bool,
 }
 
@@ -137,6 +138,10 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0)
         .min(100);
+    let dice_fee_account: u64 = std::env::var("DICE_FEE_ACCOUNT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let dice_demo = std::env::var("DICE_DEMO")
         .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -204,6 +209,7 @@ async fn main() {
         dice_min_usdc,
         dice_max_usdc,
         dice_fee,
+        dice_fee_account,
         dice_demo,
     });
 

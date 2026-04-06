@@ -760,17 +760,28 @@ pub async fn handle_dice_roll(
 
     edit_game_msg(&bot, chat_id, game_msg_id, &text, kb).await;
 
-    let _ = bot.send_message(ChatId(chat_id), format!("🎲 {player_name} rolled: {dice_value}"))
+    // Send "rolled dice" first, then reveal the value after animation finishes
+    let roll_msg = bot.send_message(ChatId(chat_id), format!("🎲 {player_name} rolled dice..."))
         .reply_parameters(ReplyParameters::new(msg.id))
         .await;
 
     persist_games(&state);
 
+    // Wait for dice animation to finish, then reveal
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    if let Ok(sent) = roll_msg {
+        let _ = bot.edit_message_text(
+            ChatId(chat_id),
+            sent.id,
+            format!("🎲 {player_name} rolled: {dice_value}"),
+        ).await;
+    }
+
     if should_resolve {
         let _ = bot.send_message(ChatId(chat_id), "🎲 All players rolled! Calculating results...")
             .reply_parameters(ReplyParameters::new(msg.id))
             .await;
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
         resolve_game(&bot, &state, game_id).await;
     }
 
@@ -968,26 +979,19 @@ async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
     let prize_each_str = prize_each.to_string();
 
     // Distribute funds
-    if game.demo {
-        // Demo mode: no actual transfers
-    } else if winners.len() == 1 {
-        let winner = winners[0];
+    if !game.demo {
+        // Claim all checks to first winner (collects full pot)
+        let collector = winners[0];
         for p in &game.players {
-            claim_with_retry(state, winner.user_id, &p.check_key, game_id).await;
-        }
-    } else {
-        // Multiple winners — claim all to first winner, then redistribute
-        let first_winner = winners[0];
-        for p in &game.players {
-            claim_with_retry(state, first_winner.user_id, &p.check_key, game_id).await;
+            claim_with_retry(state, collector.user_id, &p.check_key, game_id).await;
         }
 
-        // Redistribute to other winners
+        // Redistribute prize_each to other winners
         for &winner in &winners[1..] {
             match state
                 .outlayer
                 .create_payment_check(
-                    first_winner.user_id,
+                    collector.user_id,
                     &token.contract,
                     &prize_each_str,
                     &format!("dice:{game_id}:split"),
@@ -999,6 +1003,29 @@ async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
                 }
                 Err(e) => {
                     tracing::error!(game_id, "split create check: {e}");
+                }
+            }
+        }
+
+        // Collect fee
+        if fee_amount > 0 && state.dice_fee_account > 0 {
+            let fee_str = fee_amount.to_string();
+            match state
+                .outlayer
+                .create_payment_check(
+                    collector.user_id,
+                    &token.contract,
+                    &fee_str,
+                    &format!("dice:{game_id}:fee"),
+                )
+                .await
+            {
+                Ok((_cid, ckey)) => {
+                    claim_with_retry(state, state.dice_fee_account, &ckey, game_id).await;
+                    tracing::info!(game_id, fee = fee_str.as_str(), "dice fee collected");
+                }
+                Err(e) => {
+                    tracing::error!(game_id, "fee create check: {e}");
                 }
             }
         }
