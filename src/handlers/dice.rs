@@ -234,13 +234,17 @@ fn trim_zeros(s: &str) -> &str {
     }
 }
 
+fn tip_command(token_key: &str) -> &'static str {
+    if token_key == "near" { "near" } else { "usd" }
+}
+
 fn betting_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) -> (String, InlineKeyboardMarkup) {
     let stake_display = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
     let stake_short = trim_zeros(&stake_display);
     let players_list: Vec<&str> = game.players.iter().map(|p| p.display_name.as_str()).collect();
     let mins = remaining_secs / 60;
     let secs = remaining_secs % 60;
-    let cmd = token.symbol.to_lowercase();
+    let cmd = tip_command(&game.token_key);
     let dt = demo_tag(game);
     let text = format!(
         "🎲 <b>Dice Game{dt} — {prefix}{stake_short} {symbol}</b>\n\n\
@@ -550,15 +554,16 @@ pub async fn join_game(
     };
 
     // Check token match (read-only, no race concern)
-    let game_token_cfg = game_token(&state, &{
+    let game_token_key = {
         let g = match state.dice_games.get(&game_id) {
             Some(g) => g,
             None => return Ok(()),
         };
         g.token_key.clone()
-    });
+    };
+    let game_token_cfg = game_token(&state, &game_token_key);
     if token.contract != game_token_cfg.contract {
-        let cmd = game_token_cfg.symbol.to_lowercase();
+        let cmd = tip_command(&game_token_key);
         reply!(
             bot,
             msg,
