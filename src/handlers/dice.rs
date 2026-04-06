@@ -242,6 +242,7 @@ fn betting_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) ->
 
 fn rolling_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) -> (String, InlineKeyboardMarkup) {
     let stake_display = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
+    let stake_display = trim_zeros(&stake_display);
     let mins = remaining_secs / 60;
     let secs = remaining_secs % 60;
     let dt = demo_tag(game);
@@ -268,8 +269,10 @@ fn rolling_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) ->
 }
 
 fn results_message(game: &DiceGame, token: &TokenConfig, winners: &[&GamePlayer], prize_each: &str) -> String {
-    let stake_display = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
-    let prize_display = format_amount(prize_each, token.decimals, token.display_dp);
+    let stake_fmt = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
+    let stake_display = trim_zeros(&stake_fmt);
+    let prize_fmt = format_amount(prize_each, token.decimals, token.display_dp);
+    let prize_display = trim_zeros(&prize_fmt);
     let dt = demo_tag(game);
 
     let mut lines = Vec::new();
@@ -309,7 +312,8 @@ fn results_message(game: &DiceGame, token: &TokenConfig, winners: &[&GamePlayer]
 }
 
 fn cancelled_message(game: &DiceGame, token: &TokenConfig) -> String {
-    let stake_display = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
+    let stake_fmt = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
+    let stake_display = trim_zeros(&stake_fmt);
     let creator = &game.players[0].display_name;
     let dt = demo_tag(game);
     format!(
@@ -321,7 +325,8 @@ fn cancelled_message(game: &DiceGame, token: &TokenConfig) -> String {
 }
 
 fn all_zero_message(game: &DiceGame, token: &TokenConfig) -> String {
-    let stake_display = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
+    let stake_fmt = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
+    let stake_display = trim_zeros(&stake_fmt);
     let dt = demo_tag(game);
     format!(
         "🎲 <b>Dice Game{dt} — No Winners</b>\n\
@@ -821,8 +826,11 @@ async fn handle_betting_timeout(bot: &Bot, state: &Arc<AppState>, game_id: GameI
             .edit_message_text(
                 ChatId(game_snapshot.chat_id),
                 teloxide::types::MessageId(game_snapshot.message_id),
-                text,
+                &text,
             )
+            .parse_mode(HTML)
+            .await;
+        let _ = bot.send_message(ChatId(game_snapshot.chat_id), &text)
             .parse_mode(HTML)
             .await;
 
@@ -896,8 +904,11 @@ async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
             .edit_message_text(
                 ChatId(game.chat_id),
                 teloxide::types::MessageId(game.message_id),
-                text,
+                &text,
             )
+            .parse_mode(HTML)
+            .await;
+        let _ = bot.send_message(ChatId(game.chat_id), &text)
             .parse_mode(HTML)
             .await;
 
@@ -955,14 +966,17 @@ async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
         }
     }
 
-    // Update message
+    // Update original message + send new message with results
     let text = results_message(&game, token, &winners, &prize_each_str);
     let _ = bot
         .edit_message_text(
             ChatId(game.chat_id),
             teloxide::types::MessageId(game.message_id),
-            text,
+            &text,
         )
+        .parse_mode(HTML)
+        .await;
+    let _ = bot.send_message(ChatId(game.chat_id), &text)
         .parse_mode(HTML)
         .await;
 
