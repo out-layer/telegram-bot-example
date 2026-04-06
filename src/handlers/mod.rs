@@ -143,7 +143,11 @@ pub fn deposit_choose_amount(token_key: &str) -> (String, InlineKeyboardMarkup) 
     let text = format!(
         "<b>📥 Deposit {symbol}</b>\n\nChoose amount or enter a custom one:"
     );
-    let presets = ["0.5", "1", "5", "10"];
+    let presets = if token_key == "near" {
+        &["0.1", "0.5", "1", "5"] as &[&str]
+    } else {
+        &["0.5", "1", "5", "10"]
+    };
     let kb = InlineKeyboardMarkup::new(vec![
         presets
             .iter()
