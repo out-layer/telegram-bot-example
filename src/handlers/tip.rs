@@ -89,8 +89,9 @@ pub async fn handle(
         return Ok(());
     }
 
-    // Parse amount
-    let amount_raw = match parse_amount(args.trim(), token.decimals) {
+    // Parse amount (first word only — rest is optional message)
+    let amount_str = args.trim().split_whitespace().next().unwrap_or("");
+    let amount_raw = match parse_amount(amount_str, token.decimals) {
         Some(a) if a > 0 => a,
         _ => {
             reply!(
