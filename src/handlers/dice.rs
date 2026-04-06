@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use teloxide::prelude::*;
-use teloxide::types::ReplyParameters;
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters};
 
 use super::{TokenConfig, HTML};
 use crate::outlayer::{format_amount, parse_amount};
@@ -184,6 +184,14 @@ async fn claim_with_retry(state: &AppState, user_id: u64, check_key: &str, game_
     }
 }
 
+async fn edit_game_msg(bot: &Bot, chat_id: i64, msg_id: i32, text: &str, kb: InlineKeyboardMarkup) {
+    let _ = bot
+        .edit_message_text(ChatId(chat_id), teloxide::types::MessageId(msg_id), text)
+        .parse_mode(HTML)
+        .reply_markup(kb)
+        .await;
+}
+
 macro_rules! reply {
     ($bot:expr, $msg:expr, $text:expr) => {
         $bot.send_message($msg.chat.id, $text)
@@ -194,27 +202,45 @@ macro_rules! reply {
 
 // ── Message formatting ────────────────────────────────────────────
 
-fn betting_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) -> String {
+fn dice_refresh_kb(game_id: GameId) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![
+        InlineKeyboardButton::callback("🔄 Refresh", format!("dice:refresh:{game_id}")),
+    ]])
+}
+
+/// Trim trailing zeros: "1.0000" → "1", "1.5000" → "1.5"
+fn trim_zeros(s: &str) -> &str {
+    if s.contains('.') {
+        let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+        if trimmed.is_empty() { "0" } else { trimmed }
+    } else {
+        s
+    }
+}
+
+fn betting_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) -> (String, InlineKeyboardMarkup) {
     let stake_display = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
+    let stake_short = trim_zeros(&stake_display);
     let players_list: Vec<&str> = game.players.iter().map(|p| p.display_name.as_str()).collect();
     let mins = remaining_secs / 60;
     let secs = remaining_secs % 60;
     let cmd = token.symbol.to_lowercase();
     let dt = demo_tag(game);
-    format!(
-        "🎲 <b>Dice Game{dt} — {prefix}{stake_display} {symbol}</b>\n\n\
-         Bet: {prefix}{stake_display} {symbol}\n\
+    let text = format!(
+        "🎲 <b>Dice Game{dt} — {prefix}{stake_short} {symbol}</b>\n\n\
+         Bet: {prefix}{stake_short} {symbol}\n\
          Players ({count}): {players}\n\n\
          ⏳ Waiting for players... ({mins}:{secs:02})\n\
-         Reply <code>/{cmd} {stake_display}</code> to join!",
+         Reply <code>/{cmd} {stake_short}</code> to join!",
         prefix = token.prefix,
         symbol = token.symbol,
         count = game.players.len(),
         players = players_list.join(", "),
-    )
+    );
+    (text, dice_refresh_kb(game.game_id))
 }
 
-fn rolling_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) -> String {
+fn rolling_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) -> (String, InlineKeyboardMarkup) {
     let stake_display = format_amount(&game.min_stake_raw, token.decimals, token.display_dp);
     let mins = remaining_secs / 60;
     let secs = remaining_secs % 60;
@@ -229,7 +255,7 @@ fn rolling_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) ->
         lines.push(format!("{} — {status}", p.display_name));
     }
 
-    format!(
+    let text = format!(
         "🎲 <b>Dice Game{dt} — Roll!</b>\n\
          Bet: {prefix}{stake_display} {symbol}\n\n\
          {players}\n\n\
@@ -237,7 +263,8 @@ fn rolling_message(game: &DiceGame, token: &TokenConfig, remaining_secs: u64) ->
         prefix = token.prefix,
         symbol = token.symbol,
         players = lines.join("\n"),
-    )
+    );
+    (text, dice_refresh_kb(game.game_id))
 }
 
 fn results_message(game: &DiceGame, token: &TokenConfig, winners: &[&GamePlayer], prize_each: &str) -> String {
@@ -451,9 +478,10 @@ pub async fn start_game(
         demo,
     };
 
-    let text = betting_message(&game, token, state.dice_betting_timeout);
+    let (text, kb) = betting_message(&game, token, state.dice_betting_timeout);
     let sent = bot.send_message(msg.chat.id, &text)
         .parse_mode(HTML)
+        .reply_markup(kb)
         .reply_parameters(ReplyParameters::new(msg.id))
         .await?;
 
@@ -597,7 +625,7 @@ pub async fn join_game(
     };
 
     // Atomically check phase + already joined + push player
-    let text = {
+    let (text, kb) = {
         let mut game = match state.dice_games.get_mut(&game_id) {
             Some(g) => g,
             None => return Ok(()),
@@ -635,10 +663,7 @@ pub async fn join_game(
         betting_message(&game, game_token_cfg, remaining)
     }; // guard dropped
 
-    let _ = bot
-        .edit_message_text(ChatId(chat_id), teloxide::types::MessageId(reply_msg_id), text)
-        .parse_mode(HTML)
-        .await;
+    edit_game_msg(&bot, chat_id, reply_msg_id, &text, kb).await;
 
     persist_games(&state);
 
@@ -663,7 +688,7 @@ pub async fn handle_dice_roll(
     };
 
     // Mutate under the guard, compute text + should_resolve, then drop guard before I/O
-    let (text, should_resolve, game_msg_id) = {
+    let (text, kb, should_resolve, game_msg_id) = {
         let mut game = match state.dice_games.get_mut(&game_id) {
             Some(g) => g,
             None => return Ok(()),
@@ -689,17 +714,14 @@ pub async fn handle_dice_roll(
 
         let token = game_token(&state, &game.token_key);
         let remaining = game.rolling_deadline.unwrap_or(0).saturating_sub(now_ts());
-        let text = rolling_message(&game, token, remaining);
+        let (text, kb) = rolling_message(&game, token, remaining);
         let should_resolve = game.players.iter().all(|p| p.dice_value.is_some());
         let mid = game.message_id;
 
-        (text, should_resolve, mid)
+        (text, kb, should_resolve, mid)
     }; // guard dropped — now safe to do I/O
 
-    let _ = bot
-        .edit_message_text(ChatId(chat_id), teloxide::types::MessageId(game_msg_id), text)
-        .parse_mode(HTML)
-        .await;
+    edit_game_msg(&bot, chat_id, game_msg_id, &text, kb).await;
 
     persist_games(&state);
 
@@ -800,15 +822,8 @@ async fn handle_betting_timeout(bot: &Bot, state: &Arc<AppState>, game_id: GameI
     } else {
         let rolling_deadline = game_snapshot.rolling_deadline.unwrap();
 
-        let text = rolling_message(&game_snapshot, token, state.dice_rolling_timeout);
-        let _ = bot
-            .edit_message_text(
-                ChatId(game_snapshot.chat_id),
-                teloxide::types::MessageId(game_snapshot.message_id),
-                text,
-            )
-            .parse_mode(HTML)
-            .await;
+        let (text, kb) = rolling_message(&game_snapshot, token, state.dice_rolling_timeout);
+        edit_game_msg(bot, game_snapshot.chat_id, game_snapshot.message_id, &text, kb).await;
 
         persist_games(state);
 
@@ -946,6 +961,32 @@ async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
 
     let winner_names: Vec<&str> = winners.iter().map(|w| w.display_name.as_str()).collect();
     tracing::info!(game_id, winners = ?winner_names, "dice game resolved");
+}
+
+// ── Callback: refresh timer ───────────────────────────────────────
+
+pub async fn handle_refresh(bot: &Bot, state: &AppState, chat_id: i64, msg_id: i32, game_id: GameId) {
+    let game = match state.dice_games.get(&game_id) {
+        Some(g) => g.clone(),
+        None => return,
+    };
+
+    let token = game_token(state, &game.token_key);
+    let now = now_ts();
+
+    match game.phase {
+        GamePhase::Betting => {
+            let remaining = game.betting_deadline.saturating_sub(now);
+            let (text, kb) = betting_message(&game, token, remaining);
+            edit_game_msg(bot, chat_id, msg_id, &text, kb).await;
+        }
+        GamePhase::Rolling => {
+            let remaining = game.rolling_deadline.unwrap_or(0).saturating_sub(now);
+            let (text, kb) = rolling_message(&game, token, remaining);
+            edit_game_msg(bot, chat_id, msg_id, &text, kb).await;
+        }
+        _ => {}
+    }
 }
 
 // ── Cleanup ───────────────────────────────────────────────────────
