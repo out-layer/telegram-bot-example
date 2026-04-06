@@ -887,10 +887,13 @@ async fn handle_betting_timeout(bot: &Bot, state: &Arc<AppState>, game_id: GameI
 
         persist_games(state);
 
+        let players_mention: Vec<&str> = game_snapshot.players.iter()
+            .map(|p| p.display_name.as_str())
+            .collect();
         let _ = bot
             .send_message(
                 ChatId(game_snapshot.chat_id),
-                "🎲 Bets are closed! Roll your dice!",
+                format!("🎲 Bets are closed! Roll your dice!\n{}", players_mention.join(" ")),
             )
             .await;
 
