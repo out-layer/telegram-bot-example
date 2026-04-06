@@ -667,7 +667,17 @@ pub async fn join_game(
 
     persist_games(&state);
 
-    reply!(bot, msg, format!("🎲 {} joined the game!", display_name(sender)));
+    let join_msg = if amount_raw > min_stake {
+        let stake_display = format_amount(&min_stake.to_string(), token.decimals, token.display_dp);
+        let stake_short = trim_zeros(&stake_display);
+        format!(
+            "🎲 {} joined the game! Bet: {}{stake_short} {} (change returned)",
+            display_name(sender), token.prefix, token.symbol,
+        )
+    } else {
+        format!("🎲 {} joined the game!", display_name(sender))
+    };
+    reply!(bot, msg, join_msg);
     tracing::info!(game_id, user = sender.id.0, "player joined dice game");
     Ok(())
 }
