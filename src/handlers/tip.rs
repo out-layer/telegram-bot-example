@@ -37,6 +37,16 @@ pub async fn handle(
         return Ok(());
     }
 
+    // If there's an active betting game in this chat matching the token, join it
+    // (works with or without reply)
+    if !msg.chat.is_private() {
+        let chat_id = msg.chat.id.0;
+        let token_key = if token.symbol == "NEAR" { "near" } else { "usdc" };
+        if let Some(game_id) = super::dice::find_active_betting_game(&state, chat_id, token_key) {
+            return super::dice::join_game_by_id(bot, msg, state, args, token, game_id).await;
+        }
+    }
+
     let reply = match msg.reply_to_message() {
         Some(r) => r,
         None => {
@@ -51,6 +61,14 @@ pub async fn handle(
             return Ok(());
         }
     };
+
+    // If replying to a bot's dice game message, route to join game
+    if reply.from.as_ref().map(|u| u.is_bot).unwrap_or(false) {
+        let key = (msg.chat.id.0, reply.id.0);
+        if state.dice_msg_index.contains_key(&key) {
+            return super::dice::join_game(bot, msg, state, args, token).await;
+        }
+    }
 
     let sender = match &msg.from {
         Some(u) => u,
@@ -81,8 +99,9 @@ pub async fn handle(
         return Ok(());
     }
 
-    // Parse amount
-    let amount_raw = match parse_amount(args.trim(), token.decimals) {
+    // Parse amount (first word only — rest is optional message)
+    let amount_str = args.trim().split_whitespace().next().unwrap_or("");
+    let amount_raw = match parse_amount(amount_str, token.decimals) {
         Some(a) if a > 0 => a,
         _ => {
             reply!(

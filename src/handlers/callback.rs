@@ -221,6 +221,14 @@ pub async fn handle(bot: Bot, q: CallbackQuery, state: Arc<AppState>) -> Respons
             edit(&bot, chat_id, message_id, &text, kb).await;
         }
 
+        _ if data.starts_with("dice:refresh:") => {
+            if let Some(game_id_str) = data.strip_prefix("dice:refresh:") {
+                if let Ok(game_id) = game_id_str.parse::<u64>() {
+                    super::dice::handle_refresh(&bot, &state, chat_id.0, message_id.0, game_id).await;
+                }
+            }
+        }
+
         _ => {}
     }
 
