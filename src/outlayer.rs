@@ -68,7 +68,11 @@ impl OutlayerClient {
 
     fn make_bearer(&self, seed: &str) -> String {
         let ts = Self::timestamp();
-        let message = format!("auth:{seed}:{ts}");
+        // Vault-scoped Bearer-near: the coordinator binds the signed message to
+        // the vault, so vault_id MUST be part of what we sign — not just the
+        // JSON payload. Verified against prod: signing "auth:{seed}:{ts}"
+        // alone returns 401 invalid_signature when vault_id is in the payload.
+        let message = format!("auth:{seed}:{ts}:{}", self.vault_id);
         let signature = self.sign_message(&message);
 
         let payload = serde_json::json!({
