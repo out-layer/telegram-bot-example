@@ -1,12 +1,12 @@
 # outlayer-tipbot
 
-Telegram tip bot for NEAR and USDC, powered by Outlayer deterministic wallets. Zero database — wallets are derived from a single NEAR key + Telegram user ID.
+Telegram tip bot for NEAR and USDC, powered by Outlayer deterministic wallets scoped to a sovereign vault. Zero database — wallets are derived from a single NEAR key + vault id + Telegram user ID.
 
 ## How it works
 
-One NEAR private key in env. For each Telegram user, the bot computes `seed = sha256("tg:{user_id}")` and uses it to derive an Outlayer custody wallet. The same seed always produces the same wallet. No per-user secrets stored anywhere — restart the bot, move to another server, everything works.
+One NEAR private key in env, one vault deployed on chain. For each Telegram user, the bot computes `seed = sha256("tg:{user_id}")` and uses it (together with the vault id) to derive an Outlayer custody wallet under the per-vault MPC master. The same seed always produces the same wallet. No per-user secrets stored anywhere — restart the bot, move to another server, everything works.
 
-Every Outlayer API request is signed with the bot's NEAR key using deterministic auth: `Bearer near:<base64url(JSON{account_id, seed, pubkey, timestamp, signature}))>`. The coordinator verifies the ed25519 signature and maps `(account_id, seed)` to a wallet.
+Every Outlayer API request is signed with the bot's NEAR key using deterministic auth: `Bearer near:<base64url(JSON{account_id, seed, pubkey, timestamp, signature, vault_id}))>`. `account_id` is the vault's **parent** NEAR account (where the bot's pubkey is registered as an access key); `vault_id` is the full vault account id. The coordinator verifies the ed25519 signature, checks the pubkey lives on `account_id` (= vault.parent) on-chain, and derives the wallet under the vault's master.
 
 Tips use payment checks: sender locks tokens into an ephemeral intents account, receiver claims them. On failure — 3 retries, then reclaim back to sender. Funds are never lost.
 
@@ -133,8 +133,9 @@ Prerequisites: contract account must have storage registered on `wrap.near` (one
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `TELEGRAM_BOT_TOKEN` | yes | — | From @BotFather |
-| `NEAR_ACCOUNT_ID` | yes | — | NEAR account that owns the bot's key |
-| `NEAR_PRIVATE_KEY` | yes | — | `ed25519:<base58>` private key |
+| `NEAR_ACCOUNT_ID` | yes | — | Vault's **parent** NEAR account (holds the bot's access key) |
+| `NEAR_PRIVATE_KEY` | yes | — | `ed25519:<base58>` private key matching an access key on `NEAR_ACCOUNT_ID` |
+| `OUTLAYER_VAULT_ID` | yes | — | Full vault account id (e.g. `vault.my-tipbot.near`); parent must equal `NEAR_ACCOUNT_ID` |
 | `OUTLAYER_API` | no | `https://api.outlayer.fastnear.com` | Outlayer coordinator |
 | `WNEAR_TOKEN` | no | `wrap.near` | wNEAR contract |
 | `USDC_TOKEN` | no | USDC contract hash | USDC contract |
@@ -148,23 +149,22 @@ For testnet: `WNEAR_TOKEN=wrap.testnet`, `USDC_TOKEN=usdc.fakes.testnet`, `DEPOS
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/register` | POST | Create/derive deterministic wallet (signature in body) |
 | `/wallet/v1/balance?token=...&source=intents` | GET | Token balance (string, u128-safe) |
-| `/wallet/v1/address?chain=near` | GET | Wallet deposit address (hex64) |
+| `/wallet/v1/address?chain=near` | GET | Wallet deposit address (hex64) — also auto-provisions the sub-wallet on first hit |
 | `/wallet/v1/payment-check/create` | POST | Lock funds into ephemeral check |
 | `/wallet/v1/payment-check/claim` | POST | Claim check (receiver's auth) |
 | `/wallet/v1/payment-check/reclaim` | POST | Return check to creator (by check_id) |
 | `/wallet/v1/intents/swap` | POST | Gasless swap (nep141: prefixed tokens, amount_in) |
 | `/wallet/v1/intents/withdraw` | POST | Gasless withdraw (token, amount, chain, to) |
 
-Auth for `/register`: NEAR signature fields in request body.
-Auth for `/wallet/v1/*`: `Authorization: Bearer near:<base64url>` header.
+Auth for `/wallet/v1/*`: `Authorization: Bearer near:<base64url>` header. Sub-wallets auto-create on first request — no explicit `/register` call needed.
 
 ## Security model
 
-- **One key, all wallets.** The NEAR private key controls every user's wallet. Protect it.
+- **One key, all wallets.** The NEAR private key controls every user's wallet via signed bearer auth. Protect it.
 - **Seed is predictable** — `sha256("tg:{user_id}")` can be computed by anyone who knows the Telegram user ID. This is by design: the seed without the NEAR key signature is useless.
-- **Key rotation** — add new key to NEAR account, update env, restart bot, remove old key. Wallets unaffected (identity = account_id + seed, not key).
+- **Key rotation** — add new key to vault.parent NEAR account, update env, restart bot, remove old key. Wallets unaffected (identity = vault_id + seed + account_id, not key).
+- **Sovereign exit** — vault.parent can `unilateral_initiate_recovery` on the vault contract; after the exit window the keystore stops signing and per-user wallets re-derive locally via MPC CKD. See `near-offshore/docs/LEAVING_OUTLAYER.md`.
 - **Double-spend protection** — `tip_locks` DashMap prevents concurrent tip operations from the same sender.
 - **Rate limiting** — 5 seconds between tips per sender.
 - **Tip validations** — self-tip, bot recipient, anonymous admin, amount bounds, balance check.

@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct OutlayerClient {
     account_id: String,
+    vault_id: String,
     signing_key: SigningKey,
     pubkey_str: String,
     api_url: String,
@@ -14,7 +15,12 @@ pub struct OutlayerClient {
 }
 
 impl OutlayerClient {
-    pub fn new(account_id: String, private_key_str: &str, api_url: String) -> Self {
+    pub fn new(
+        account_id: String,
+        private_key_str: &str,
+        vault_id: String,
+        api_url: String,
+    ) -> Self {
         let key_b58 = private_key_str
             .strip_prefix("ed25519:")
             .expect("NEAR_PRIVATE_KEY must start with ed25519:");
@@ -36,6 +42,7 @@ impl OutlayerClient {
 
         Self {
             account_id,
+            vault_id,
             signing_key,
             pubkey_str,
             api_url,
@@ -70,6 +77,7 @@ impl OutlayerClient {
             "pubkey": self.pubkey_str,
             "timestamp": ts,
             "signature": signature,
+            "vault_id": self.vault_id,
         });
 
         let encoded = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
@@ -105,6 +113,10 @@ impl OutlayerClient {
         let text = resp.text().await.unwrap_or_default();
 
         if !status.is_success() {
+            // Full body to logs (helps diagnose vault.parent mismatch, key not on
+            // parent, stale signature, etc.); truncated form for the Err string
+            // that flows up to user-facing handlers.
+            tracing::error!(%status, method, path, body = %text, "outlayer error");
             return Err(format!(
                 "{method} {path} → {status} {}",
                 &text[..text.len().min(300)]
@@ -121,35 +133,10 @@ impl OutlayerClient {
 
     // ── Public API ─────────────────────────────────────────────────
 
-    pub async fn register_wallet(&self, tg_user_id: u64) -> Result<serde_json::Value, String> {
-        let seed = self.seed_for_user(tg_user_id);
-        let ts = Self::timestamp();
-        let message = format!("register:{seed}:{ts}");
-        let signature = self.sign_message(&message);
-
-        let url = format!("{}/register", self.api_url);
-        let resp = self
-            .http
-            .post(&url)
-            .json(&serde_json::json!({
-                "account_id": self.account_id,
-                "seed": seed,
-                "pubkey": self.pubkey_str,
-                "message": message,
-                "signature": signature,
-            }))
-            .send()
-            .await
-            .map_err(|e| format!("register failed: {e}"))?;
-
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(format!("register → {status} {text}"));
-        }
-
-        serde_json::from_str(&text).map_err(|e| format!("register parse: {e}"))
+    /// No-op kept for handler-call-site compatibility. Outlayer auto-creates
+    /// the sub-wallet on first `Bearer near:` request — see vault flow A.
+    pub async fn register_wallet(&self, _tg_user_id: u64) -> Result<(), String> {
+        Ok(())
     }
 
     /// Get token balance as a raw string (preserves u128 precision).

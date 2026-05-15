@@ -53,7 +53,13 @@ pub async fn handle(bot: Bot, q: CallbackQuery, state: Arc<AppState>) -> Respons
                 let token_key = parts[2];
                 let amount = parts[3];
                 let _ = state.outlayer.register_wallet(user_id).await;
-                let addr = state.outlayer.get_address(user_id, "near").await.unwrap_or_else(|_| "error".into());
+                let addr = match state.outlayer.get_address(user_id, "near").await {
+                    Ok(a) => a,
+                    Err(e) => {
+                        tracing::error!(user = user_id, "get_address(near): {e}");
+                        "error".into()
+                    }
+                };
                 let url = fund_url(&state, &addr, token_key, amount);
                 let symbol = state.token_by_key(token_key).symbol.clone();
                 let kb = InlineKeyboardMarkup::new(vec![

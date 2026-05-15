@@ -86,6 +86,7 @@ async fn main() {
     let near_account_id = std::env::var("NEAR_ACCOUNT_ID").expect("NEAR_ACCOUNT_ID must be set");
     let near_private_key =
         std::env::var("NEAR_PRIVATE_KEY").expect("NEAR_PRIVATE_KEY must be set");
+    let vault_id = std::env::var("OUTLAYER_VAULT_ID").expect("OUTLAYER_VAULT_ID must be set");
     let outlayer_api = std::env::var("OUTLAYER_API")
         .unwrap_or_else(|_| "https://api.outlayer.fastnear.com".into());
     let deposit_contract =
@@ -158,7 +159,8 @@ async fn main() {
         &std::env::var("DICE_MAX_USDC").unwrap_or_else(|_| "10".into()), 6,
     ).unwrap_or(10_000_000);
 
-    let outlayer_client = OutlayerClient::new(near_account_id, &near_private_key, outlayer_api);
+    let outlayer_client =
+        OutlayerClient::new(near_account_id, &near_private_key, vault_id, outlayer_api);
     let bot = Bot::new(&token);
 
     // Register commands in Telegram's menu

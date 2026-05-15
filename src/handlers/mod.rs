@@ -83,11 +83,13 @@ pub async fn balance_view(
     state: &crate::AppState,
     user_id: u64,
 ) -> (String, InlineKeyboardMarkup) {
-    let addr = state
-        .outlayer
-        .get_address(user_id, "near")
-        .await
-        .unwrap_or_else(|_| "—".into());
+    let addr = match state.outlayer.get_address(user_id, "near").await {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::error!(user = user_id, "get_address(near): {e}");
+            "—".into()
+        }
+    };
 
     let near_bal = state
         .outlayer
