@@ -87,6 +87,11 @@ async fn main() {
     let near_private_key =
         std::env::var("NEAR_PRIVATE_KEY").expect("NEAR_PRIVATE_KEY must be set");
     let vault_id = std::env::var("OUTLAYER_VAULT_ID").expect("OUTLAYER_VAULT_ID must be set");
+    tracing::info!(
+        near_account_id = %near_account_id,
+        outlayer_vault_id = %vault_id,
+        "vault config loaded"
+    );
     let outlayer_api = std::env::var("OUTLAYER_API")
         .unwrap_or_else(|_| "https://api.outlayer.fastnear.com".into());
     let deposit_contract =
