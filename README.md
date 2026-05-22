@@ -33,7 +33,7 @@ What this buys you in practice:
 |----------|-------------|
 | No per-user storage | Nothing to back up, nothing to leak, nothing to migrate. |
 | Deterministic derivation | Restart / redeploy / move servers — wallets are identical. |
-| One secret to protect | The NEAR private key in env is the *only* thing that matters. |
+| One secret to protect | One key from your *own* NEAR account, in env, is the *only* thing that matters — not an OutLayer-issued credential. |
 | Key rotation without migration | Swap the env key; wallets are unaffected (see [Guarantees](#guarantees)). |
 | TEE custody | Even the bot operator cannot extract a user's wallet key. |
 
@@ -45,7 +45,7 @@ This is a **custodial** backend: users hold no keys, so the bot must be able to 
 |---|---|---|
 | Wallet keys on your server | yes, at rest | **no** — derived in TEE via MPC |
 | Server / DB leak | every key stolen, forever, silently | one *authority* key leaks; wallet keys were never exposed |
-| Revoke on compromise | impossible — attacker holds the real keys | `delete-key` → attacker locked out in **~60s** |
+| Revoke on compromise | impossible — attacker holds the real keys | `delete-key` → attacker locked out within the coordinator's access-key cache TTL (**~60s**) |
 | Key rotation | rewrite every key | swap the key; wallets untouched |
 | Constrain what the key can do | nothing | per-wallet policy (limits, allowlist, freeze) |
 | Stop trusting the operator | — | sovereign exit (vault mode) |
