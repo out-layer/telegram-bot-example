@@ -11,15 +11,19 @@
 ## 1. Build the bot
 
 ```bash
-cargo build --release
+cargo build --release --features dice
 ```
 
 Binary: `target/release/outlayer-tipbot`.
 
+> The `dice` feature enables the group dice game. It is **off by default** (a
+> plain `cargo build --release` produces a pure stateless tipbot with no on-disk
+> state). This deployment runs with dice enabled, so build with `--features dice`.
+
 ### Cross-compile for Linux (from macOS)
 
 ```bash
-docker run --rm -v "$PWD":/app -w /app rust:1.86 cargo build --release
+docker run --rm -v "$PWD":/app -w /app rust:1.86 cargo build --release --features dice
 ```
 
 ## 2. Build and deploy the deposit contract
@@ -160,7 +164,7 @@ sudo journalctl -u outlayer-tipbot -f
 FROM rust:1.86 AS builder
 WORKDIR /app
 COPY . .
-RUN cargo build --release
+RUN cargo build --release --features dice
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
@@ -189,7 +193,7 @@ docker run -d --name tipbot --env-file .env --restart always outlayer-tipbot
 
 ```bash
 git pull
-cargo build --release
+cargo build --release --features dice
 sudo cp target/release/outlayer-tipbot /opt/outlayer-tipbot/
 sudo systemctl restart outlayer-tipbot
 ```

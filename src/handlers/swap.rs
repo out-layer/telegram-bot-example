@@ -190,7 +190,7 @@ pub async fn execute(
                     to_token.symbol
                 )
             } else {
-                format!("{}", to_token.symbol)
+                to_token.symbol.clone()
             };
 
             let text = format!(

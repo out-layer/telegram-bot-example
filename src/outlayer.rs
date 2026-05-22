@@ -7,7 +7,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct OutlayerClient {
     account_id: String,
-    vault_id: String,
+    /// Optional sovereign vault. `Some` → wallets derive under the vault's MPC
+    /// master and the vault id is bound into the signed auth message. `None` →
+    /// base deterministic flow: wallets derive under `account_id` directly.
+    vault_id: Option<String>,
     signing_key: SigningKey,
     pubkey_str: String,
     api_url: String,
@@ -18,7 +21,7 @@ impl OutlayerClient {
     pub fn new(
         account_id: String,
         private_key_str: &str,
-        vault_id: String,
+        vault_id: Option<String>,
         api_url: String,
     ) -> Self {
         let key_b58 = private_key_str
@@ -68,21 +71,29 @@ impl OutlayerClient {
 
     fn make_bearer(&self, seed: &str) -> String {
         let ts = Self::timestamp();
-        // Vault-scoped Bearer-near: the coordinator binds the signed message to
-        // the vault, so vault_id MUST be part of what we sign — not just the
-        // JSON payload. Verified against prod: signing "auth:{seed}:{ts}"
-        // alone returns 401 invalid_signature when vault_id is in the payload.
-        let message = format!("auth:{seed}:{ts}:{}", self.vault_id);
-        let signature = self.sign_message(&message);
 
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "account_id": self.account_id,
             "seed": seed,
             "pubkey": self.pubkey_str,
             "timestamp": ts,
-            "signature": signature,
-            "vault_id": self.vault_id,
         });
+
+        // The signed message and payload must match what the coordinator
+        // expects for each mode. With a vault, vault_id MUST be part of what we
+        // sign — not just the JSON payload (verified against prod: signing
+        // "auth:{seed}:{ts}" alone returns 401 invalid_signature when vault_id
+        // is in the payload). Without a vault, it's the base flow and vault_id
+        // is omitted from both the message and the payload.
+        let message = match &self.vault_id {
+            Some(vault_id) => {
+                payload["vault_id"] = serde_json::json!(vault_id);
+                format!("auth:{seed}:{ts}:{vault_id}")
+            }
+            None => format!("auth:{seed}:{ts}"),
+        };
+        let signature = self.sign_message(&message);
+        payload["signature"] = serde_json::json!(signature);
 
         let encoded = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
         format!("near:{encoded}")

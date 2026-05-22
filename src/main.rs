@@ -1,7 +1,9 @@
 mod handlers;
 mod outlayer;
 
-use std::sync::atomic::AtomicU64;
+#[cfg(feature = "dice")]
+mod extensions;
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -10,9 +12,8 @@ use teloxide::prelude::*;
 use teloxide::types::{BotCommand, BotCommandScope, ReplyParameters};
 use teloxide::utils::command::BotCommands;
 
-use handlers::dice::DiceGame;
 use handlers::{ConvoState, PendingSwap, PendingWithdrawal, TokenConfig, HTML};
-use outlayer::{parse_amount, OutlayerClient};
+use outlayer::OutlayerClient;
 
 pub struct AppState {
     pub outlayer: OutlayerClient,
@@ -26,22 +27,9 @@ pub struct AppState {
     pub conversations: DashMap<u64, ConvoState>,
     pub pending_withdrawals: DashMap<u64, PendingWithdrawal>,
     pub pending_swaps: DashMap<u64, PendingSwap>,
-    // Dice game state
-    pub dice_games: DashMap<u64, DiceGame>,
-    pub dice_msg_index: DashMap<(i64, i32), u64>,
-    pub dice_player_index: DashMap<(i64, u64), u64>,
-    pub dice_next_id: AtomicU64,
-    pub dice_allowed_chats: Vec<i64>,
-    pub dice_games_file: String,
-    pub dice_betting_timeout: u64,
-    pub dice_rolling_timeout: u64,
-    pub dice_min_near: u128,
-    pub dice_max_near: u128,
-    pub dice_min_usdc: u128,
-    pub dice_max_usdc: u128,
-    pub dice_fee: u8,            // 0-100 percent taken from pot
-    pub dice_fee_account: u64,   // tg user_id that receives fee
-    pub dice_demo: bool,
+    // Optional dice extension — all its state is owned here, behind one field.
+    #[cfg(feature = "dice")]
+    pub dice: extensions::dice::DiceState,
 }
 
 impl AppState {
@@ -68,6 +56,7 @@ enum Command {
     Usd(String),
     #[command(description = "Withdraw funds")]
     Withdraw,
+    #[cfg(feature = "dice")]
     #[command(description = "Dice game (in group)")]
     Dice(String),
 }
@@ -86,10 +75,12 @@ async fn main() {
     let near_account_id = std::env::var("NEAR_ACCOUNT_ID").expect("NEAR_ACCOUNT_ID must be set");
     let near_private_key =
         std::env::var("NEAR_PRIVATE_KEY").expect("NEAR_PRIVATE_KEY must be set");
-    let vault_id = std::env::var("OUTLAYER_VAULT_ID").expect("OUTLAYER_VAULT_ID must be set");
+    // Optional: with a vault, wallets derive under the vault's MPC master
+    // (sovereign exit). Without it, the base flow derives under NEAR_ACCOUNT_ID.
+    let vault_id = std::env::var("OUTLAYER_VAULT_ID").ok();
     tracing::info!(
         near_account_id = %near_account_id,
-        outlayer_vault_id = %vault_id,
+        outlayer_vault_id = vault_id.as_deref().unwrap_or("<none>"),
         "vault config loaded"
     );
     let outlayer_api = std::env::var("OUTLAYER_API")
@@ -123,47 +114,6 @@ async fn main() {
         prefix: "$",
     };
 
-    // Dice game config
-    let dice_allowed_chats: Vec<i64> = std::env::var("DICE_ALLOWED_CHATS")
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|s| s.trim().parse().ok())
-        .collect();
-    let dice_betting_timeout: u64 = std::env::var("DICE_BETTING_TIMEOUT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(120);
-    let dice_rolling_timeout: u64 = std::env::var("DICE_ROLLING_TIMEOUT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(120);
-    let dice_games_file = std::env::var("DICE_GAMES_FILE")
-        .unwrap_or_else(|_| "./dice_games.json".into());
-    let dice_fee: u8 = std::env::var("DICE_FEE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0)
-        .min(100);
-    let dice_fee_account: u64 = std::env::var("DICE_FEE_ACCOUNT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let dice_demo = std::env::var("DICE_DEMO")
-        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let dice_min_near = parse_amount(
-        &std::env::var("DICE_MIN_NEAR").unwrap_or_else(|_| "0.1".into()), 24,
-    ).unwrap_or(100_000_000_000_000_000_000_000);
-    let dice_max_near = parse_amount(
-        &std::env::var("DICE_MAX_NEAR").unwrap_or_else(|_| "10".into()), 24,
-    ).unwrap_or(10_000_000_000_000_000_000_000_000);
-    let dice_min_usdc = parse_amount(
-        &std::env::var("DICE_MIN_USDC").unwrap_or_else(|_| "0.1".into()), 6,
-    ).unwrap_or(100_000);
-    let dice_max_usdc = parse_amount(
-        &std::env::var("DICE_MAX_USDC").unwrap_or_else(|_| "10".into()), 6,
-    ).unwrap_or(10_000_000);
-
     let outlayer_client =
         OutlayerClient::new(near_account_id, &near_private_key, vault_id, outlayer_api);
     let bot = Bot::new(&token);
@@ -178,12 +128,18 @@ async fn main() {
         ])
         .scope(BotCommandScope::AllPrivateChats)
         .await;
+    let group_commands = vec![
+        BotCommand::new("near", "Tip NEAR (reply)"),
+        BotCommand::new("usd", "Tip USDC (reply)"),
+    ];
+    #[cfg(feature = "dice")]
+    let group_commands = {
+        let mut cmds = group_commands;
+        cmds.push(BotCommand::new("dice", "Dice game"));
+        cmds
+    };
     let _ = bot
-        .set_my_commands(vec![
-            BotCommand::new("near", "Tip NEAR (reply)"),
-            BotCommand::new("usd", "Tip USDC (reply)"),
-            BotCommand::new("dice", "Dice game"),
-        ])
+        .set_my_commands(group_commands)
         .scope(BotCommandScope::AllGroupChats)
         .await;
 
@@ -203,41 +159,33 @@ async fn main() {
         conversations: DashMap::new(),
         pending_withdrawals: DashMap::new(),
         pending_swaps: DashMap::new(),
-        dice_games: DashMap::new(),
-        dice_msg_index: DashMap::new(),
-        dice_player_index: DashMap::new(),
-        dice_next_id: AtomicU64::new(1), // overwritten by restore_games if file exists
-        dice_allowed_chats,
-        dice_games_file,
-        dice_betting_timeout,
-        dice_rolling_timeout,
-        dice_min_near,
-        dice_max_near,
-        dice_min_usdc,
-        dice_max_usdc,
-        dice_fee,
-        dice_fee_account,
-        dice_demo,
+        #[cfg(feature = "dice")]
+        dice: extensions::dice::DiceState::from_env(),
     });
 
-    // Restore dice games from disk
-    handlers::dice::restore_games(&state, &bot);
+    // Restore dice games from disk (feature-gated; the core bot has no disk state)
+    #[cfg(feature = "dice")]
+    extensions::dice::restore_games(&state, &bot);
 
-    let handler = dptree::entry()
-        .branch(
-            Update::filter_message()
-                .filter_command::<Command>()
-                .endpoint(handle_command),
-        )
-        .branch(
-            Update::filter_message()
-                .filter(|msg: Message| {
-                    msg.dice()
-                        .map(|d| d.emoji == teloxide::types::DiceEmoji::Dice)
-                        .unwrap_or(false)
-                })
-                .endpoint(handle_dice_message),
-        )
+    let handler = dptree::entry().branch(
+        Update::filter_message()
+            .filter_command::<Command>()
+            .endpoint(handle_command),
+    );
+
+    // Dice rolls arrive as plain dice messages — only listen for them with the feature on.
+    #[cfg(feature = "dice")]
+    let handler = handler.branch(
+        Update::filter_message()
+            .filter(|msg: Message| {
+                msg.dice()
+                    .map(|d| d.emoji == teloxide::types::DiceEmoji::Dice)
+                    .unwrap_or(false)
+            })
+            .endpoint(handle_dice_message),
+    );
+
+    let handler = handler
         .branch(Update::filter_message().endpoint(handle_text))
         .branch(Update::filter_callback_query().endpoint(handlers::callback::handle));
 
@@ -298,8 +246,9 @@ async fn handle_command(
                 .await
         }
 
+        #[cfg(feature = "dice")]
         Command::Dice(args) => {
-            handlers::dice::start_game(bot, msg, state, args).await
+            extensions::dice::start_game(bot, msg, state, args).await
         }
 
         Command::Withdraw => {
@@ -343,14 +292,15 @@ async fn ensure_private(bot: &Bot, msg: &Message, state: &AppState) -> ResponseR
     Ok(false)
 }
 
+#[cfg(feature = "dice")]
 async fn handle_dice_message(bot: Bot, msg: Message, state: Arc<AppState>) -> ResponseResult<()> {
-    let dice_value = msg.dice().unwrap().value as u8;
+    let dice_value = msg.dice().unwrap().value;
     let user_id = match msg.from.as_ref() {
         Some(u) => u.id.0,
         None => return Ok(()),
     };
     let chat_id = msg.chat.id.0;
-    handlers::dice::handle_dice_roll(bot, msg, state, user_id, chat_id, dice_value).await
+    extensions::dice::handle_dice_roll(bot, msg, state, user_id, chat_id, dice_value).await
 }
 
 async fn handle_text(bot: Bot, msg: Message, state: Arc<AppState>) -> ResponseResult<()> {

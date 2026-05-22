@@ -1,14 +1,110 @@
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use teloxide::prelude::*;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters};
 
-use super::{TokenConfig, HTML};
+use crate::handlers::{TokenConfig, HTML};
 use crate::outlayer::{format_amount, parse_amount};
 use crate::AppState;
+
+// ── DiceState (all state this extension owns) ─────────────────────
+//
+// Lives behind `AppState.dice` so the core tipbot carries no dice fields.
+// This is the one stateful component: `games`/`*_index` are in-memory, and
+// `games_file` is the on-disk journal that lets in-flight games (and the
+// non-derivable payment-check keys they hold) survive a restart.
+
+pub struct DiceState {
+    pub games: DashMap<u64, DiceGame>,
+    pub msg_index: DashMap<(i64, i32), u64>,
+    pub player_index: DashMap<(i64, u64), u64>,
+    pub next_id: AtomicU64, // overwritten by restore_games if the journal exists
+    pub allowed_chats: Vec<i64>,
+    pub games_file: String,
+    pub betting_timeout: u64,
+    pub rolling_timeout: u64,
+    pub min_near: u128,
+    pub max_near: u128,
+    pub min_usdc: u128,
+    pub max_usdc: u128,
+    pub fee: u8,          // 0-100 percent taken from pot
+    pub fee_account: u64, // tg user_id that receives the fee
+    pub demo: bool,
+}
+
+impl DiceState {
+    pub fn from_env() -> Self {
+        let allowed_chats: Vec<i64> = std::env::var("DICE_ALLOWED_CHATS")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        let betting_timeout: u64 = std::env::var("DICE_BETTING_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(120);
+        let rolling_timeout: u64 = std::env::var("DICE_ROLLING_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(120);
+        let games_file =
+            std::env::var("DICE_GAMES_FILE").unwrap_or_else(|_| "./dice_games.json".into());
+        let fee: u8 = std::env::var("DICE_FEE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+            .min(100);
+        let fee_account: u64 = std::env::var("DICE_FEE_ACCOUNT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let demo = std::env::var("DICE_DEMO")
+            .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let min_near = parse_amount(
+            &std::env::var("DICE_MIN_NEAR").unwrap_or_else(|_| "0.1".into()),
+            24,
+        )
+        .unwrap_or(100_000_000_000_000_000_000_000);
+        let max_near = parse_amount(
+            &std::env::var("DICE_MAX_NEAR").unwrap_or_else(|_| "10".into()),
+            24,
+        )
+        .unwrap_or(10_000_000_000_000_000_000_000_000);
+        let min_usdc = parse_amount(
+            &std::env::var("DICE_MIN_USDC").unwrap_or_else(|_| "0.1".into()),
+            6,
+        )
+        .unwrap_or(100_000);
+        let max_usdc = parse_amount(
+            &std::env::var("DICE_MAX_USDC").unwrap_or_else(|_| "10".into()),
+            6,
+        )
+        .unwrap_or(10_000_000);
+
+        Self {
+            games: DashMap::new(),
+            msg_index: DashMap::new(),
+            player_index: DashMap::new(),
+            next_id: AtomicU64::new(1),
+            allowed_chats,
+            games_file,
+            betting_timeout,
+            rolling_timeout,
+            min_near,
+            max_near,
+            min_usdc,
+            max_usdc,
+            fee,
+            fee_account,
+            demo,
+        }
+    }
+}
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -74,16 +170,17 @@ pub fn load_games(path: &str) -> DiceGameStore {
 
 pub fn persist_games(state: &AppState) {
     let games: Vec<DiceGame> = state
-        .dice_games
+        .dice
+        .games
         .iter()
         .filter(|r| r.phase == GamePhase::Betting || r.phase == GamePhase::Rolling)
         .map(|r| r.value().clone())
         .collect();
     let store = DiceGameStore {
         games,
-        next_id: state.dice_next_id.load(Ordering::Relaxed),
+        next_id: state.dice.next_id.load(Ordering::Relaxed),
     };
-    let path = &state.dice_games_file;
+    let path = &state.dice.games_file;
     let tmp = format!("{path}.tmp");
     if let Ok(data) = serde_json::to_string_pretty(&store) {
         if std::fs::write(&tmp, &data).is_ok() {
@@ -93,8 +190,8 @@ pub fn persist_games(state: &AppState) {
 }
 
 pub fn restore_games(state: &Arc<AppState>, bot: &Bot) {
-    let store = load_games(&state.dice_games_file);
-    state.dice_next_id.store(store.next_id, Ordering::Relaxed);
+    let store = load_games(&state.dice.games_file);
+    state.dice.next_id.store(store.next_id, Ordering::Relaxed);
     let now = now_ts();
 
     for game in store.games {
@@ -108,31 +205,31 @@ pub fn restore_games(state: &Arc<AppState>, bot: &Bot) {
         let msg_id = game.message_id;
 
         // Rebuild indexes
-        state.dice_msg_index.insert((chat_id, msg_id), game_id);
+        state.dice.msg_index.insert((chat_id, msg_id), game_id);
         if game.phase == GamePhase::Rolling {
             for p in &game.players {
-                state.dice_player_index.insert((chat_id, p.user_id), game_id);
+                state.dice.player_index.insert((chat_id, p.user_id), game_id);
             }
         }
 
         let phase = game.phase.clone();
-        state.dice_games.insert(game_id, game);
+        state.dice.games.insert(game_id, game);
 
         // Re-arm timers
         match phase {
             GamePhase::Betting => {
-                let deadline = state.dice_games.get(&game_id).map(|g| g.betting_deadline).unwrap_or(0);
+                let deadline = state.dice.games.get(&game_id).map(|g| g.betting_deadline).unwrap_or(0);
                 spawn_betting_timer(bot.clone(), state.clone(), game_id, deadline, now);
             }
             GamePhase::Rolling => {
-                let deadline = state.dice_games.get(&game_id).and_then(|g| g.rolling_deadline).unwrap_or(0);
+                let deadline = state.dice.games.get(&game_id).and_then(|g| g.rolling_deadline).unwrap_or(0);
                 spawn_rolling_timer(bot.clone(), state.clone(), game_id, deadline, now);
             }
             _ => {}
         }
     }
 
-    let count = state.dice_games.len();
+    let count = state.dice.games.len();
     if count > 0 {
         tracing::info!("Restored {count} active dice game(s)");
     }
@@ -164,9 +261,9 @@ fn game_token<'a>(state: &'a AppState, token_key: &str) -> &'a TokenConfig {
 
 fn stake_limits(state: &AppState, token_key: &str) -> (u128, u128) {
     if token_key == "near" {
-        (state.dice_min_near, state.dice_max_near)
+        (state.dice.min_near, state.dice.max_near)
     } else {
-        (state.dice_min_usdc, state.dice_max_usdc)
+        (state.dice.min_usdc, state.dice.max_usdc)
     }
 }
 
@@ -374,7 +471,7 @@ pub async fn start_game(
     let chat_id = msg.chat.id.0;
 
     // Validate chat whitelist
-    if !state.dice_allowed_chats.contains(&chat_id) {
+    if !state.dice.allowed_chats.contains(&chat_id) {
         reply!(bot, msg, "🎲 Dice game is not enabled in this chat.");
         return Ok(());
     }
@@ -386,7 +483,7 @@ pub async fn start_game(
     }
 
     // One active game per chat
-    for entry in state.dice_games.iter() {
+    for entry in state.dice.games.iter() {
         let g = entry.value();
         if g.chat_id == chat_id && (g.phase == GamePhase::Betting || g.phase == GamePhase::Rolling) {
             reply!(bot, msg, "🎲 A game is already active in this chat. Wait for it to finish.");
@@ -395,7 +492,7 @@ pub async fn start_game(
     }
 
     // Parse args: "near 1" or "usd 5"
-    let parts: Vec<&str> = args.trim().split_whitespace().collect();
+    let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.len() != 2 {
         reply!(bot, msg, "Usage: /dice near 1 or /dice usd 5");
         return Ok(());
@@ -437,9 +534,9 @@ pub async fn start_game(
         None => return Ok(()),
     };
 
-    let demo = state.dice_demo;
+    let demo = state.dice.demo;
     let amount_str = amount_raw.to_string();
-    let game_id = state.dice_next_id.fetch_add(1, Ordering::Relaxed);
+    let game_id = state.dice.next_id.fetch_add(1, Ordering::Relaxed);
 
     let (check_id, check_key) = if demo {
         (String::new(), String::new())
@@ -486,7 +583,7 @@ pub async fn start_game(
     };
 
     let now = now_ts();
-    let betting_deadline = now + state.dice_betting_timeout;
+    let betting_deadline = now + state.dice.betting_timeout;
 
     let game = DiceGame {
         game_id,
@@ -509,7 +606,7 @@ pub async fn start_game(
         demo,
     };
 
-    let (text, kb) = betting_message(&game, token, state.dice_betting_timeout);
+    let (text, kb) = betting_message(&game, token, state.dice.betting_timeout);
     let sent = bot.send_message(msg.chat.id, &text)
         .parse_mode(HTML)
         .reply_markup(kb)
@@ -520,8 +617,8 @@ pub async fn start_game(
     let mut game = game;
     game.message_id = msg_id;
 
-    state.dice_msg_index.insert((chat_id, msg_id), game_id);
-    state.dice_games.insert(game_id, game);
+    state.dice.msg_index.insert((chat_id, msg_id), game_id);
+    state.dice.games.insert(game_id, game);
     persist_games(&state);
 
     spawn_betting_timer(bot, state, game_id, betting_deadline, now);
@@ -533,7 +630,7 @@ pub async fn start_game(
 // ── Join game ─────────────────────────────────────────────────────
 
 pub fn find_active_betting_game(state: &AppState, chat_id: i64, token_key: &str) -> Option<GameId> {
-    state.dice_games.iter().find_map(|e| {
+    state.dice.games.iter().find_map(|e| {
         let g = e.value();
         if g.chat_id == chat_id && g.phase == GamePhase::Betting && g.token_key == token_key {
             Some(g.game_id)
@@ -551,7 +648,7 @@ pub async fn join_game(
     token: &TokenConfig,
 ) -> ResponseResult<()> {
     let reply = msg.reply_to_message().unwrap();
-    let game_id = match state.dice_msg_index.get(&(msg.chat.id.0, reply.id.0)) {
+    let game_id = match state.dice.msg_index.get(&(msg.chat.id.0, reply.id.0)) {
         Some(id) => *id,
         None => return Ok(()),
     };
@@ -575,7 +672,7 @@ pub async fn join_game_by_id(
 
     // Check token match (read-only, no race concern)
     let game_token_key = {
-        let g = match state.dice_games.get(&game_id) {
+        let g = match state.dice.games.get(&game_id) {
             Some(g) => g,
             None => return Ok(()),
         };
@@ -599,7 +696,7 @@ pub async fn join_game_by_id(
     let amount_raw = match parse_amount(args.trim(), token.decimals) {
         Some(a) if a > 0 => a,
         _ => {
-            let g = match state.dice_games.get(&game_id) {
+            let g = match state.dice.games.get(&game_id) {
                 Some(g) => g,
                 None => return Ok(()),
             };
@@ -615,7 +712,7 @@ pub async fn join_game_by_id(
 
     // Read min_stake and demo flag
     let (min_stake, is_demo) = {
-        let g = match state.dice_games.get(&game_id) {
+        let g = match state.dice.games.get(&game_id) {
             Some(g) => g,
             None => return Ok(()),
         };
@@ -678,7 +775,7 @@ pub async fn join_game_by_id(
 
     // Atomically check phase + already joined + push player
     let (text, kb, game_msg_id) = {
-        let mut game = match state.dice_games.get_mut(&game_id) {
+        let mut game = match state.dice.games.get_mut(&game_id) {
             Some(g) => g,
             None => return Ok(()),
         };
@@ -746,11 +843,11 @@ pub async fn handle_dice_roll(
     chat_id: i64,
     dice_value: u8,
 ) -> ResponseResult<()> {
-    let game_id = match state.dice_player_index.get(&(chat_id, user_id)) {
+    let game_id = match state.dice.player_index.get(&(chat_id, user_id)) {
         Some(id) => *id,
         None => {
             // Check if there's an active rolling game in this chat — tell non-participant
-            let has_rolling = state.dice_games.iter().any(|e| {
+            let has_rolling = state.dice.games.iter().any(|e| {
                 e.value().chat_id == chat_id && e.value().phase == GamePhase::Rolling
             });
             if has_rolling {
@@ -764,7 +861,7 @@ pub async fn handle_dice_roll(
 
     // Mutate under the guard, compute text + should_resolve, then drop guard before I/O
     let (text, kb, should_resolve, game_msg_id, player_name) = {
-        let mut game = match state.dice_games.get_mut(&game_id) {
+        let mut game = match state.dice.games.get_mut(&game_id) {
             Some(g) => g,
             None => return Ok(()),
         };
@@ -864,7 +961,7 @@ pub fn spawn_rolling_timer(bot: Bot, state: Arc<AppState>, game_id: GameId, dead
 async fn handle_betting_timeout(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
     // Atomically read phase and transition — prevents join race
     let (cancelled, game_snapshot) = {
-        let mut g = match state.dice_games.get_mut(&game_id) {
+        let mut g = match state.dice.games.get_mut(&game_id) {
             Some(g) => g,
             None => return,
         };
@@ -877,13 +974,13 @@ async fn handle_betting_timeout(bot: &Bot, state: &Arc<AppState>, game_id: GameI
             (true, g.clone())
         } else {
             let now = now_ts();
-            let rolling_deadline = now + state.dice_rolling_timeout;
+            let rolling_deadline = now + state.dice.rolling_timeout;
             g.phase = GamePhase::Rolling;
             g.rolling_deadline = Some(rolling_deadline);
 
             // Build player index for dice detection
             for p in &g.players {
-                state.dice_player_index.insert((g.chat_id, p.user_id), game_id);
+                state.dice.player_index.insert((g.chat_id, p.user_id), game_id);
             }
 
             (false, g.clone())
@@ -921,7 +1018,7 @@ async fn handle_betting_timeout(bot: &Bot, state: &Arc<AppState>, game_id: GameI
     } else {
         let rolling_deadline = game_snapshot.rolling_deadline.unwrap();
 
-        let (text, kb) = rolling_message(&game_snapshot, token, state.dice_rolling_timeout);
+        let (text, kb) = rolling_message(&game_snapshot, token, state.dice.rolling_timeout);
         edit_game_msg(bot, game_snapshot.chat_id, game_snapshot.message_id, &text, kb).await;
 
         persist_games(state);
@@ -935,7 +1032,7 @@ async fn handle_betting_timeout(bot: &Bot, state: &Arc<AppState>, game_id: GameI
                 format!(
                     "🎲 Bets are closed! Roll your dice!\n{}\nYou have {} to roll.",
                     players_mention.join(" "),
-                    format_duration(state.dice_rolling_timeout),
+                    format_duration(state.dice.rolling_timeout),
                 ),
             )
             .await;
@@ -955,7 +1052,7 @@ async fn handle_rolling_timeout(bot: &Bot, state: &Arc<AppState>, game_id: GameI
 async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
     // Atomically claim ownership by setting phase to Finished — prevents double resolution
     let game = {
-        let mut g = match state.dice_games.get_mut(&game_id) {
+        let mut g = match state.dice.games.get_mut(&game_id) {
             Some(g) => g,
             None => return,
         };
@@ -1014,7 +1111,7 @@ async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
         .collect();
 
     let total_pot: u128 = game.players.iter().map(|p| p.stake_raw.parse::<u128>().unwrap_or(0)).sum();
-    let fee_pct = state.dice_fee;
+    let fee_pct = state.dice.fee;
     let fee_amount = if fee_pct > 0 && game.players.len() >= 2 {
         total_pot * fee_pct as u128 / 100
     } else {
@@ -1054,7 +1151,7 @@ async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
         }
 
         // Collect fee
-        if fee_amount > 0 && state.dice_fee_account > 0 {
+        if fee_amount > 0 && state.dice.fee_account > 0 {
             let fee_str = fee_amount.to_string();
             match state
                 .outlayer
@@ -1067,7 +1164,7 @@ async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
                 .await
             {
                 Ok((_cid, ckey)) => {
-                    claim_with_retry(state, state.dice_fee_account, &ckey, game_id).await;
+                    claim_with_retry(state, state.dice.fee_account, &ckey, game_id).await;
                     tracing::info!(game_id, fee = fee_str.as_str(), "dice fee collected");
                 }
                 Err(e) => {
@@ -1101,7 +1198,7 @@ async fn resolve_game(bot: &Bot, state: &Arc<AppState>, game_id: GameId) {
 // ── Callback: refresh timer ───────────────────────────────────────
 
 pub async fn handle_refresh(bot: &Bot, state: &AppState, chat_id: i64, msg_id: i32, game_id: GameId) {
-    let game = match state.dice_games.get(&game_id) {
+    let game = match state.dice.games.get(&game_id) {
         Some(g) => g.clone(),
         None => return,
     };
@@ -1127,9 +1224,9 @@ pub async fn handle_refresh(bot: &Bot, state: &AppState, chat_id: i64, msg_id: i
 // ── Cleanup ───────────────────────────────────────────────────────
 
 fn cleanup_game(state: &AppState, game: &DiceGame) {
-    state.dice_msg_index.remove(&(game.chat_id, game.message_id));
+    state.dice.msg_index.remove(&(game.chat_id, game.message_id));
     for p in &game.players {
-        state.dice_player_index.remove(&(game.chat_id, p.user_id));
+        state.dice.player_index.remove(&(game.chat_id, p.user_id));
     }
-    state.dice_games.remove(&game.game_id);
+    state.dice.games.remove(&game.game_id);
 }

@@ -6,6 +6,13 @@ edition = "2021"
 [workspace]
 exclude = ["contract"]
 
+[features]
+default = []
+# Optional real-money dice game for Telegram groups. The default build is a
+# pure stateless tipbot (no on-disk state); enabling `dice` adds a local game
+# journal — see src/extensions/dice.rs.
+dice = []
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 teloxide = { version = "0.13", features = ["macros"] }
