@@ -1,4 +1,4 @@
-# outlayer-tipbot
+# Telegram Tip Bot — a stateless OutLayer backend
 
 A Telegram tip bot for NEAR and USDC, built as a **fully stateless backend** on top of [OutLayer](https://outlayer.fastnear.com).
 
@@ -36,6 +36,21 @@ What this buys you in practice:
 | One secret to protect | The NEAR private key in env is the *only* thing that matters. |
 | Key rotation without migration | Swap the env key; wallets are unaffected (see [Guarantees](#guarantees)). |
 | TEE custody | Even the bot operator cannot extract a user's wallet key. |
+
+### Versus storing keys yourself
+
+This is a **custodial** backend: users hold no keys, so the bot must be able to act for them — that's inherent to a zero-setup Telegram product, not to OutLayer. The win isn't avoiding custody; it's *how much safer* the custody is than the obvious alternative — a database of per-user private keys:
+
+| | DB of private keys | OutLayer (this bot) |
+|---|---|---|
+| Wallet keys on your server | yes, at rest | **no** — derived in TEE via MPC |
+| Server / DB leak | every key stolen, forever, silently | one *authority* key leaks; wallet keys were never exposed |
+| Revoke on compromise | impossible — attacker holds the real keys | `delete-key` → attacker locked out in **~60s** |
+| Key rotation | rewrite every key | swap the key; wallets untouched |
+| Constrain what the key can do | nothing | per-wallet policy (limits, allowlist, freeze) |
+| Stop trusting the operator | — | sovereign exit (vault mode) |
+
+Residual risk: while the authority key is valid it can act on *every* wallet — so protect and rotate it (env-only, never committed). Bound the blast radius with a per-wallet policy (spending limits / approvals / freeze) and by keeping only working balances hot.
 
 The entire integration is ~290 lines: [src/outlayer.rs](src/outlayer.rs). Everything else in the repo is Telegram UX.
 
@@ -155,11 +170,11 @@ The per-vault master comes from **MPC CKD** (child-key derivation) over the NEAR
 
 **Revocation within ~60s.** Compromised key? `near delete-key` it. Within the coordinator's 60-second access-key cache TTL, every request signed by that key returns 401. No coordinator action, no DB update.
 
-**Sovereign exit (vault mode only).** Because wallets live under a vault you own, the vault parent can `unilateral_initiate_recovery`: after an exit window the contract atomically swaps OutLayer's TEE key out and your key in, and OutLayer loses all access to the vault account. You then reproduce the per-vault master yourself by replaying the same MPC CKD call from chain (same `(predecessor, derivation_path)` → same master), and re-derive every wallet's ed25519 key via `HMAC(master, "wallet:<wallet_id>:near")` — fully offline, no OutLayer cooperation. The funds and key authority were always yours; exit just removes OutLayer from the signing path. Full runbook: OutLayer's `LEAVING_OUTLAYER.md`.
+**Sovereign exit (vault mode only).** Because wallets live under a vault you own, the vault parent can `unilateral_initiate_recovery`: after an exit window the contract atomically swaps OutLayer's TEE key out and your key in, and OutLayer loses all access to the vault account. You then reproduce the per-vault master yourself by replaying the same MPC CKD call from chain (same `(predecessor, derivation_path)` → same master), and re-derive every wallet's ed25519 key via `HMAC(master, "wallet:<wallet_id>:near")` — fully offline, no OutLayer cooperation. The funds and key authority were always yours; exit just removes OutLayer from the signing path. Full runbook: [LEAVING_OUTLAYER.md](https://github.com/fastnear/near-outlayer/blob/main/docs/LEAVING_OUTLAYER.md).
 
 **Funds safety on tips.** Payment-check tips lock → claim → reclaim. On repeated claim failure the funds return to the sender. Concurrent tips from one sender are blocked by an in-process lock (double-spend guard); tips are rate-limited to one per 5 seconds per sender.
 
-**Trust boundary — be explicit.** This is **custodial**. One NEAR key has authority over *all* user wallets in the vault. Compromise of that key compromises every wallet until the key is revoked. The model removes the *database* as an attack surface; it does **not** make the system non-custodial. Treat the NEAR key like a hot wallet's master key: env-only, never committed, rotated on suspicion.
+**Trust boundary.** This is a custodial backend — see [Versus storing keys yourself](#versus-storing-keys-yourself) above for what that does and doesn't mean, and how to bound the one residual risk (the authority key).
 
 ---
 
@@ -175,9 +190,8 @@ outlayer-tipbot/
 │       └── dice.rs        Dice game — stateful, off by default (`--features dice`)
 ├── contract/
 │   └── src/lib.rs         Deposit helper contract (native NEAR → wNEAR → intents)
-├── .env.example
-├── DEPLOY.md
-└── PROJECT.md             Full implementation notes
+├── .env.example          All config vars (incl. the dice extension)
+└── DEPLOY.md             Build, run (systemd/docker), key rotation
 ```
 
 ## Quick start
@@ -201,7 +215,7 @@ cargo run
 | `WNEAR_TOKEN` / `USDC_TOKEN` | no | Token contracts (mainnet defaults; testnet values in `.env.example`) |
 | `DEPOSIT_CONTRACT` | no | Deposit helper (default `deposit.tipbot.near`) |
 
-See [PROJECT.md](PROJECT.md) for the full variable list (including the dice game) and deployment details in [DEPLOY.md](DEPLOY.md).
+See [.env.example](.env.example) for the full variable list (including the dice extension) and [DEPLOY.md](DEPLOY.md) for deployment.
 
 ## License
 
