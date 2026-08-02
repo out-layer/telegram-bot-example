@@ -219,4 +219,7 @@ See [.env.example](.env.example) for the full variable list (including the dice 
 
 ## License
 
-MIT
+MIT OR Apache-2.0, at your option — see `LICENSE-MIT` and `LICENSE-APACHE`.
+
+Dual-licensed on purpose: this is a reference implementation meant to be copied into your own
+product, and the Apache-2.0 option carries an express patent grant for anyone who wants one.
