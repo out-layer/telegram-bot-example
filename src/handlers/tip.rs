@@ -4,7 +4,7 @@ use teloxide::prelude::*;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters};
 
 use super::TokenConfig;
-use crate::outlayer::{adjust_for_dust, format_amount, parse_amount};
+use crate::outlayer::{adjust_for_dust, format_amount, parse_amount, CheckTransfer};
 use crate::AppState;
 
 const RATE_LIMIT_SECS: u64 = 5;
@@ -222,16 +222,17 @@ async fn do_tip(
         }
     };
 
-    // Claim with retry
-    let mut claimed = false;
+    // Claim with retry. A claim answered as still on its way is not retried:
+    // it settles on its own, and the check refuses a second one meanwhile.
+    let mut claimed = None;
     for attempt in 0..CLAIM_RETRIES {
         match state
             .outlayer
             .claim_payment_check(receiver.id.0, &check_key)
             .await
         {
-            Ok(_) => {
-                claimed = true;
+            Ok(transfer) => {
+                claimed = Some(transfer);
                 break;
             }
             Err(e) => {
@@ -244,14 +245,20 @@ async fn do_tip(
         }
     }
 
-    if !claimed {
-        let _ = state
-            .outlayer
-            .reclaim_payment_check(sender.id.0, &check_id)
-            .await;
-        reply!(bot, msg, "Tip failed. Funds returned to sender.");
+    let Some(claimed) = claimed else {
+        // Said only once it is so: a reclaim can be slow, or fail, too.
+        let text = match state.outlayer.reclaim_payment_check(sender.id.0, &check_id).await {
+            Ok(CheckTransfer::Done) => "Tip failed. Funds returned to sender.".to_string(),
+            Ok(CheckTransfer::Pending) => "Tip failed. Funds are on their way back to sender.".to_string(),
+            Err(e) => {
+                tracing::error!(sender = sender.id.0, check_id = check_id.as_str(), "reclaim after a failed tip: {e}");
+                format!("Tip failed. The funds are still in payment check {check_id}; they were not returned yet.")
+            }
+        };
+        reply!(bot, msg, text);
         return Ok(());
-    }
+    };
+    let arriving = claimed == CheckTransfer::Pending;
 
     let sender_name = display_name(sender);
     let receiver_name = display_name(receiver);
@@ -266,8 +273,10 @@ async fn do_tip(
     bot.send_message(
         msg.chat.id,
         format!(
-            "{sender_name} tipped {}{display} {} to {receiver_name}",
-            token.prefix, token.symbol
+            "{sender_name} tipped {}{display} {} to {receiver_name}{}",
+            token.prefix,
+            token.symbol,
+            if arriving { " (confirming)" } else { "" }
         ),
     )
     .reply_parameters(ReplyParameters::new(msg.id))
@@ -277,10 +286,17 @@ async fn do_tip(
     let _ = bot
         .send_message(
             ChatId(receiver.id.0 as i64),
-            format!(
-                "You received {}{display} {} from {sender_name}!\n/start to check your balance.",
-                token.prefix, token.symbol
-            ),
+            if arriving {
+                format!(
+                    "{}{display} {} from {sender_name} is on its way — it lands within minutes.\n/start to check your balance.",
+                    token.prefix, token.symbol
+                )
+            } else {
+                format!(
+                    "You received {}{display} {} from {sender_name}!\n/start to check your balance.",
+                    token.prefix, token.symbol
+                )
+            },
         )
         .await;
 

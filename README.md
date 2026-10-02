@@ -135,12 +135,12 @@ Each derived wallet is a full OutLayer wallet. The bot surfaces a subset through
 |-----------|-----|------|
 | **Balances** | NEAR + USDC, u128-precise strings (no float loss) | [`get_balance`](src/outlayer.rs#L147) |
 | **Deposit address** | NEAR implicit account, multi-chain derivation available | [`get_address`](src/outlayer.rs#L272) |
-| **Tips** (`/near`, `/usd`) | Reply-to-user in a group; lock → claim → reclaim-on-failure | [`create_payment_check`](src/outlayer.rs#L165) |
+| **Tips** (`/near`, `/usd`) | Reply-to-user in a group; lock → claim → reclaim-on-failure | [`create_payment_check`](src/outlayer.rs) |
 | **Gasless swap** | NEAR ↔ USDC via NEAR Intents solver relay | [`swap`](src/outlayer.rs#L251) |
 | **Gasless withdraw** | To NEAR / Ethereum / Solana (chain auto-detected) | [`withdraw`](src/outlayer.rs#L227) |
 | **Deposit helper** | Native NEAR → wNEAR → intents in one tx | [contract/src/lib.rs](contract/src/lib.rs) |
 
-Swaps and withdrawals require **no gas** on the user's wallet — they go through the intents solver relay. Payment-check tips are atomic from the user's perspective: funds are locked into an ephemeral check, claimed by the receiver, and on claim failure (3 retries) **reclaimed to the sender** — funds are never stranded.
+Swaps and withdrawals require **no gas** on the user's wallet — they go through the intents solver relay. Payment-check tips are atomic from the user's perspective: funds are locked into an ephemeral check, claimed by the receiver, and on claim failure (3 retries) **reclaimed to the sender** — funds are never stranded. A transfer the solver relay confirms slowly is waited on (up to a minute) and then reported as on its way, never retried: a check whose funding lands late is returned to its creator in the background, and the bot says the funds are back only once the reclaim confirmed.
 
 There's also an optional group dice game ([src/extensions/dice.rs](src/extensions/dice.rs)) built on the same wallet primitives. It's **off by default** and lives behind a Cargo feature (`cargo run --features dice`) because — unlike the wallet flow — it keeps a small on-disk journal of in-flight games (escrow check keys aren't derivable). Keeping it gated is deliberate: the default build stays a pure stateless backend, and the dice extension is there as a contrast — what a stateful component looks like and why it needs durable state.
 
